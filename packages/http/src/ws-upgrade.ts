@@ -12,8 +12,8 @@ import { sha1 } from '@noble/hashes/legacy.js';
 
 import { signalAbortReason } from './abort.ts';
 import { base64EncodeBytes, concat, copy, utf8Bytes } from './bytes.ts';
-import { HttpProtocolError } from './errors.ts';
-import { STATUS_LINE, TCHAR, trimFieldValueOws, validateFieldValueBytes, validateRequestTargetBytes } from './grammar.ts';
+import { HttpProtocolError, isTlsTruncation } from './errors.ts';
+import { STATUS_LINE, TCHAR, encodeHeadSectionBytes, trimFieldValueOws, validateFieldValueBytes, validateRequestTargetBytes } from './grammar.ts';
 import { readHeadSection } from './read-head-section.ts';
 import type { DuplexStream } from './types.ts';
 
@@ -210,7 +210,7 @@ const sendUpgradeRequest = async (
     lines.push(`${name}: ${value}`);
   }
   const head = `${lines.join('\r\n')}\r\n\r\n`;
-  await writer.write(utf8Bytes(head));
+  await writer.write(encodeHeadSectionBytes(head, 'WS upgrade request head'));
 };
 
 interface UpgradeResponseHead {
@@ -488,14 +488,30 @@ const frameDuplexOnTransport = (
       while (!plainClosed) {
         const header = tryParseFrameHeader(buffer);
         if (!header) {
-          const { value, done } = await reader.read();
-          if (done) {
+          let result: ReadableStreamReadResult<Uint8Array>;
+          try {
+            result = await reader.read();
+          } catch (err) {
+            // At a frame boundary a TLS truncation and a plain transport
+            // EOF are the same observable event: RFC 6455 §7.1.5 already
+            // treats a missing Close frame as an abnormal closure, and this
+            // layer has always surfaced that as a clean end. Knowing that
+            // close_notify was also missing adds nothing here, so it must
+            // not turn into a hard error. Mid-frame is different — that
+            // truncation is caught by the length-driven read below.
+            if (isTlsTruncation(err)) {
+              closePlain();
+              return;
+            }
+            throw err;
+          }
+          if (result.done) {
             // Transport hung up without a close frame. Treat as EOF —
             // the consumer's reader sees a clean end.
             closePlain();
             return;
           }
-          buffer = concat(buffer, value);
+          buffer = concat(buffer, result.value);
           continue;
         }
         if (header.masked) {

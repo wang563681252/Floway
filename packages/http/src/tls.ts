@@ -17,6 +17,7 @@ import { webcryptoCrypto } from '@reclaimprotocol/tls/webcrypto';
 
 import { signalAbortReason } from './abort.ts';
 import { copy } from './bytes.ts';
+import { HttpProtocolError } from './errors.ts';
 import type { DuplexStream } from './types.ts';
 
 let cryptoInstalled = false;
@@ -89,8 +90,16 @@ export interface UserspaceTlsOptions {
 
 export type TlsStream = DuplexStream;
 
-// On error the returned promise rejects; on TLS clean-end the readable closes;
-// on any error after handshake the readable errors.
+// Count-based high-water mark for the plaintext readable. Declared rather
+// than left to the default so `drain()` can compare `desiredSize` against
+// it to decide whether the controller's queue has been fully consumed.
+const PLAIN_HIGH_WATER_MARK = 1;
+
+// On error the returned promise rejects; on TLS clean-end (peer close_notify)
+// the readable closes; on any error after handshake — including a transport
+// EOF that arrives without close_notify — the readable errors, but only after
+// the consumer has drained the plaintext that was decrypted before the
+// failure.
 export const userspaceTls = async (
   transport: DuplexStream,
   opts: UserspaceTlsOptions,
@@ -126,8 +135,26 @@ export const userspaceTls = async (
   //     the close on our side, and treat any throw from the controller as
   //     "already closed by the consumer."
   let plainController!: ReadableStreamDefaultController<Uint8Array>;
+  // Terminal event observed (TLS end, transport EOF, abort, cancel). No
+  // further plaintext is accepted once set.
   let plainClosed = false;
+  // `controller.close()` / `controller.error()` already called. Split from
+  // `plainClosed` because a terminal event does NOT settle the controller
+  // immediately — see `pending` below.
+  let plainSettled = false;
   let handshakeOk = false;
+  // Plaintext decrypted from the transport but not yet handed to the
+  // consumer. `ReadableStreamDefaultController.error()` runs ResetQueue
+  // (WHATWG Streams), so raising a terminal error while records are still
+  // queued in the controller would silently discard response bytes we
+  // already decrypted. The read pump runs ahead of the consumer, so at the
+  // moment a transport EOF lands there is normally still buffered data —
+  // including, for a response that completed just before a rude TCP close,
+  // the bytes that terminate the HTTP message. Buffer here instead and
+  // settle the controller only once the consumer has drained everything
+  // that arrived before the terminal event.
+  const pending: Uint8Array<ArrayBuffer>[] = [];
+  let terminalError: unknown = null;
 
   // Resolve when the handshake succeeds; reject on TLS-end or error before then.
   let handshakeResolve!: () => void;
@@ -143,15 +170,50 @@ export const userspaceTls = async (
   // a passive observer.
   handshakeDone.catch(() => { /* main handler is the await below */ });
 
+  // Move buffered plaintext into the controller until it signals
+  // back-pressure, then settle the controller if a terminal event is
+  // latched and nothing is left to deliver. Re-entered from `pull()` on
+  // every consumer read, which is what resumes a partial drain.
+  //
+  // "Nothing left to deliver" has to cover the controller's own queue as
+  // well as `pending`: a chunk we enqueued but the consumer has not read
+  // yet would be discarded by the ResetQueue inside `error()` just the
+  // same. With the count strategy below, `desiredSize` is
+  // PLAIN_HIGH_WATER_MARK minus the queued chunk count, so a full
+  // `desiredSize` is exactly "the controller queue is empty" — and it stays
+  // exact whether or not a consumer read is parked, because read requests
+  // do not change the queue size.
+  const drain = (): void => {
+    if (plainSettled) return;
+    while (pending.length > 0 && (plainController.desiredSize ?? 0) > 0) {
+      try {
+        plainController.enqueue(pending.shift()!);
+      } catch {
+        // The consumer settled the controller from the outside between
+        // reads; there is nobody left to deliver to.
+        pending.length = 0;
+        plainSettled = true;
+        return;
+      }
+    }
+    const controllerQueueEmpty = (plainController.desiredSize ?? 0) >= PLAIN_HIGH_WATER_MARK;
+    if (!plainClosed || pending.length > 0 || !controllerQueueEmpty) return;
+    plainSettled = true;
+    if (terminalError !== null) {
+      try { plainController.error(terminalError); } catch { /* already settled/cancelled */ }
+    } else {
+      try { plainController.close(); } catch { /* already settled/cancelled */ }
+    }
+  };
+
   const closePlain = (error?: unknown): void => {
     if (plainClosed) return;
     plainClosed = true;
+    terminalError = error ?? null;
     cleanupSignal();
-    if (error) {
-      try { plainController.error(error); } catch { /* already closed/errored */ }
-    } else {
-      try { plainController.close(); } catch { /* already closed/errored */ }
-    }
+    // Deliver whatever is still buffered before surfacing the outcome —
+    // an error must not cost the consumer bytes we already decrypted.
+    drain();
     // On error, abort the underlying writer so the transport tears down
     // hard; on a clean teardown, emit a polite FIN. A bare `writer.close()`
     // on the error path would graceful-end a half whose readable just
@@ -161,19 +223,12 @@ export const userspaceTls = async (
     else void writer.close().catch(logTlsTeardownError);
   };
   const safeEnqueue = (chunk: Uint8Array<ArrayBuffer>): void => {
-    // Once `plainClosed` is set, the controller has been closed/errored by
-    // a teardown path and the next reclaim-driven onApplicationData would
-    // throw ERR_INVALID_STATE. The teardown reason is the source of truth
-    // for the consumer; silently dropping post-close bytes here is correct.
-    // BEFORE plainClosed, an enqueue throw is a real invariant violation —
-    // route it through closePlain so the consumer's reader unsticks with
-    // the actual error rather than hanging forever.
+    // Once `plainClosed` is set, a terminal event has been latched and the
+    // outcome is the source of truth for the consumer; silently dropping
+    // post-terminal bytes here is correct.
     if (plainClosed) return;
-    try {
-      plainController.enqueue(chunk);
-    } catch (err) {
-      closePlain(err);
-    }
+    pending.push(chunk);
+    drain();
   };
 
   let pendingPrefix: Uint8Array | null = opts.prefix ?? null;
@@ -235,6 +290,10 @@ export const userspaceTls = async (
   // so by then tlsClient is fully initialized.
   const plainReadable = new ReadableStream<Uint8Array>({
     start(c) { plainController = c; },
+    // Resume a drain that stopped on back-pressure, and settle the
+    // controller once a latched terminal event has nothing left in front
+    // of it.
+    pull() { drain(); },
     // Consumer-initiated cancel (response body fully read or aborted) tears
     // down our side of the duplex — flag so subsequent TLS-end callbacks
     // skip their controller calls, and signal end-of-stream upward. Mirror
@@ -243,13 +302,17 @@ export const userspaceTls = async (
     // would block on a peer already gone; a clean cancel still closes.
     cancel(reason) {
       plainClosed = true;
+      // The consumer is gone: it will never read the buffer, and the
+      // stream is already settled by the cancel itself.
+      plainSettled = true;
+      pending.length = 0;
       cleanupSignal();
       void tlsClient.end().catch(logTlsTeardownError);
       void reader.cancel(reason).catch(() => {});
       if (reason instanceof Error) void writer.abort(reason).catch(logTlsTeardownError);
       else void writer.close().catch(logTlsTeardownError);
     },
-  });
+  }, { highWaterMark: PLAIN_HIGH_WATER_MARK });
 
   // App-data upward stream (consumer → TLS encrypt → transport). Same
   // post-return invariant applies — write/close/abort run only after the
@@ -281,12 +344,40 @@ export const userspaceTls = async (
       while (true) {
         const { value, done } = await reader.read();
         if (done) {
-          await tlsClient.end().catch(logTlsTeardownError);
-          // Reclaim's onTlsEnd usually fires for clean close-notify, but
-          // a raw transport EOF without an alert wouldn't trigger it.
-          // Drive closePlain ourselves so the consumer's reader unsticks
-          // when the transport simply hangs up.
-          closePlain();
+          // RFC 8446 §6.1: a party that closes cleanly MUST send
+          // close_notify first, and a transport EOF without it means the
+          // record stream was cut — by the peer crashing, a proxy hop
+          // timing the connection out, or an attacker forging a FIN
+          // (the TLS truncation attack). Report that as an error rather
+          // than an end-of-stream: this is the only place that knows WHY
+          // the stream stopped, and without it the HTTP layer above just
+          // sees a closed reader and can say nothing better than a generic
+          // body-framing EOF.
+          //
+          // Reporting is not the same as failing. Each framing layer above
+          // decides whether the truncation is observable to it — see
+          // `isTlsTruncation` in errors.ts — so a close-delimited body or a
+          // WebSocket frame boundary still ends cleanly, while chunked and
+          // Content-Length framing, which can prove the message is short,
+          // surface it.
+          //
+          // `end(error)` drives reclaim's onTlsEnd → closePlain, which
+          // latches the error but still lets the consumer drain everything
+          // already decrypted. A response that finished before the rude
+          // close therefore still completes: its consumer settles the
+          // stream from the cancel hook before the latched error is ever
+          // reached. When the peer DID send close_notify, reclaim already
+          // ended cleanly and both calls below are no-ops.
+          const truncated = new HttpProtocolError(
+            'transport EOF before TLS close_notify — the record stream was truncated',
+            'TLS_TRUNCATED',
+            { rfc: 'RFC 8446 §6.1' },
+          );
+          await tlsClient.end(truncated).catch(logTlsTeardownError);
+          // Belt-and-braces: reclaim's `end()` fires onTlsEnd today, but
+          // drive the teardown ourselves so the consumer's reader unsticks
+          // even if that ever stops being true.
+          closePlain(truncated);
           return;
         }
         await tlsClient.handleReceivedBytes(value);

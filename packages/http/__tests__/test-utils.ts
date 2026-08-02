@@ -4,6 +4,8 @@
 // handle for asserting on emitted bytes and feeding crafted server responses
 // (chunked, malformed, CL+TE smuggling vectors, …).
 
+import { HttpProtocolError } from '../src/errors.ts';
+
 export interface FakeDuplex {
   readable: ReadableStream<Uint8Array>;
   writable: WritableStream<Uint8Array>;
@@ -59,6 +61,29 @@ export const respondAndEnd = (head: string): ReadableStream<Uint8Array> => {
   fake.respond(head);
   fake.endResponse();
   return fake.readable;
+};
+
+/** Wrap a transport readable so its clean end surfaces as the TLS
+ *  truncation the userspace TLS layer raises when the socket EOFs without a
+ *  close_notify alert. Lets the framing layers be tested against that
+ *  outcome without standing up a TLS session. */
+export const truncateOnEof = (source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> => {
+  const reader = source.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const { value, done } = await reader.read();
+      if (done) {
+        controller.error(new HttpProtocolError(
+          'transport EOF before TLS close_notify — the record stream was truncated',
+          'TLS_TRUNCATED',
+          { rfc: 'RFC 8446 §6.1' },
+        ));
+        return;
+      }
+      controller.enqueue(value);
+    },
+    cancel(reason) { void reader.cancel(reason).catch(() => {}); },
+  });
 };
 
 export const collectBody = async (resp: { body: ReadableStream<Uint8Array> } | Response): Promise<string> => {

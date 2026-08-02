@@ -3,7 +3,7 @@
 
 import { copy } from './bytes.ts';
 import { decodeChunked } from './chunked.ts';
-import { HttpProtocolError } from './errors.ts';
+import { HttpProtocolError, isTlsTruncation } from './errors.ts';
 import { STATUS_LINE, TCHAR, trimFieldValueOws, validateFieldValueBytes } from './grammar.ts';
 import { readHeadSection } from './read-head-section.ts';
 import type { RawHttpResponse } from './types.ts';
@@ -364,9 +364,27 @@ const untilEofBody = (
       if (head.byteLength) controller.enqueue(head);
     },
     async pull(controller) {
-      const { value, done } = await reader.read();
-      if (done) controller.close();
-      else controller.enqueue(copy(value));
+      let result: ReadableStreamReadResult<Uint8Array>;
+      try {
+        result = await reader.read();
+      } catch (err) {
+        // RFC 9112 §6.3: with neither Transfer-Encoding nor Content-Length
+        // the message is delimited by the connection close itself, so this
+        // body shape has no signal that could distinguish a complete
+        // message from a truncated one — a recipient must take the close as
+        // the end. That makes a TLS truncation indistinguishable from the
+        // normal termination here, so it closes rather than fails. The
+        // exposure is inherent to close-delimited framing rather than
+        // something this layer introduces; chunked and Content-Length
+        // bodies, which DO know they are short, still surface it.
+        if (isTlsTruncation(err)) {
+          controller.close();
+          return;
+        }
+        throw err;
+      }
+      if (result.done) controller.close();
+      else controller.enqueue(copy(result.value));
     },
     cancel(reason) {
       reader.cancel(reason).catch(() => {});

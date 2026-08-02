@@ -8,7 +8,7 @@
 import { sha1 } from '@noble/hashes/legacy.js';
 import { describe, expect, it } from 'vitest';
 
-import { makeFakeDuplex } from './test-utils.ts';
+import { makeFakeDuplex, truncateOnEof } from './test-utils.ts';
 import { wsUpgradeAndFrame } from '../src/ws-upgrade.ts';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
@@ -312,6 +312,26 @@ describe('wsUpgradeAndFrame — frame layer round-trip', () => {
     const reader = stream.readable.getReader();
     const { value } = await reader.read();
     expect(dec(value!)).toBe('hello world');
+    reader.releaseLock();
+  });
+
+  it('treats a truncated transport at a frame boundary as the clean end it already was', async () => {
+    // RFC 6455 §7.1.5 already classes a missing Close frame as an abnormal
+    // closure, and this layer has always reported that as end-of-stream.
+    // Learning that close_notify was missing too adds nothing at a frame
+    // boundary, so it must not promote the end into a failure.
+    const fake = makeFakeDuplex();
+    const upgrade = wsUpgradeAndFrame(
+      { readable: truncateOnEof(fake.readable), writable: fake.writable },
+      { host: 'h', path: '/' },
+    );
+    await completeHandshake(fake);
+    const stream = await upgrade;
+    fake.respond(buildServerFrame(0x2, enc('last message')));
+    const reader = stream.readable.getReader();
+    expect(dec((await reader.read()).value!)).toBe('last message');
+    fake.endResponse();
+    expect(await reader.read()).toEqual({ done: true, value: undefined });
     reader.releaseLock();
   });
 

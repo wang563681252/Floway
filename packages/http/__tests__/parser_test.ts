@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { collectBody, collectBodyBytes, makeFakeDuplex, respondAndEnd } from './test-utils.ts';
+import { collectBody, collectBodyBytes, makeFakeDuplex, respondAndEnd, truncateOnEof } from './test-utils.ts';
 import { parseHttpResponse, toWebResponse } from '../src/parser.ts';
 
 describe('parseHttpResponse — status-line grammar', () => {
@@ -701,6 +701,35 @@ describe('parseHttpResponse — body framing', () => {
     fake.endResponse();
     const resp = await parseHttpResponse(fake.readable);
     expect(await collectBody(resp)).toBe('body bytes');
+  });
+
+  it('completes a close-delimited body even when the transport was truncated', async () => {
+    // RFC 9112 §6.3: with no CL and no TE the connection close IS the
+    // delimiter, so this body shape has no signal that could tell a
+    // complete message from a cut one. A TLS truncation therefore carries
+    // no information here and must not turn a body that used to arrive
+    // into a failure.
+    const fake = makeFakeDuplex();
+    fake.respond('HTTP/1.1 200 OK\r\n\r\nbody bytes');
+    fake.endResponse();
+    const resp = await parseHttpResponse(truncateOnEof(fake.readable));
+    expect(await collectBody(resp)).toBe('body bytes');
+  });
+
+  it('surfaces a truncated transport on a chunked body, which knows it is short', async () => {
+    const fake = makeFakeDuplex();
+    fake.respond('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n');
+    fake.endResponse();
+    const resp = await parseHttpResponse(truncateOnEof(fake.readable));
+    await expect(collectBody(resp)).rejects.toMatchObject({ code: 'TLS_TRUNCATED' });
+  });
+
+  it('surfaces a truncated transport on a short Content-Length body', async () => {
+    const fake = makeFakeDuplex();
+    fake.respond('HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello');
+    fake.endResponse();
+    const resp = await parseHttpResponse(truncateOnEof(fake.readable));
+    await expect(collectBody(resp)).rejects.toMatchObject({ code: 'TLS_TRUNCATED' });
   });
 
   it('errors with TRAILING_BODY_BYTES when CL is satisfied and more bytes follow', async () => {

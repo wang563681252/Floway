@@ -26,6 +26,42 @@ export const decodeAsciiHeaderSection = (bytes: Uint8Array, context: string): st
   return ASCII_DECODER.decode(bytes);
 };
 
+// Serialize an assembled request head (request line + field lines +
+// terminator) to the bytes that go on the wire.
+//
+// The head is a byte string, not Unicode text. Every runtime that hands us
+// headers models a field value as a WebIDL ByteString (Fetch, "Headers"),
+// so each JS code unit in the strings we assemble here already stands for
+// exactly one wire byte in 0x00-0xFF — an inbound `é` reaches us as the
+// single code unit U+00E9 because the byte on the wire was 0xE9. Encoding
+// that head as UTF-8 would re-expand every code unit ≥ 0x80 into a
+// multi-byte sequence, so the upstream would receive a value that is not
+// the one the client sent (and a header section carrying bytes RFC 9112 §5
+// forbids). Writing one byte per code unit — Latin-1 — is what keeps the
+// serialization byte-faithful, and matches what the runtime's own fetch
+// puts on the wire for the same header bag.
+//
+// A code unit above 0xFF cannot be a wire byte under any encoding, so it
+// is a caller bug rather than something to silently mangle: UTF-8 would
+// change the value's length and Latin-1 would truncate the high bits.
+// Reject it here, mirroring `decodeAsciiHeaderSection` on the response
+// side.
+export const encodeHeadSectionBytes = (head: string, context: string): Uint8Array => {
+  const out = new Uint8Array(head.length);
+  for (let i = 0; i < head.length; i++) {
+    const c = head.charCodeAt(i);
+    if (c > 0xff) {
+      throw new HttpProtocolError(
+        `non-byte code point U+${c.toString(16).toUpperCase().padStart(4, '0')} at offset ${i} in ${context}`,
+        'BAD_HEADERS',
+        { rfc: 'RFC 9112 §5' },
+      );
+    }
+    out[i] = c;
+  }
+  return out;
+};
+
 // RFC 9110 §5.6.3: OWS = *( SP / HTAB ). Strip from both ends of a
 // field-value. Wrapped in a helper rather than exporting the bare
 // `/g`-flag regex because a module-scope `/g` regex carries `lastIndex`

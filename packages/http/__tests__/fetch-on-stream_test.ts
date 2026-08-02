@@ -732,3 +732,41 @@ describe('fetchOnStream — writer-lock release on rejected calls', () => {
     }).not.toThrow();
   });
 });
+
+describe('fetchOnStream — request head byte encoding', () => {
+  it('emits an obs-text header value as the single byte it stands for, not a UTF-8 expansion', async () => {
+    const fake = makeFakeDuplex();
+    const promise = fetchOnStream(
+      { readable: fake.readable, writable: fake.writable },
+      // Runtimes model a header value as a WebIDL ByteString, so the wire
+      // byte 0xE9 reaches us as the single code unit U+00E9. Serializing
+      // the head as UTF-8 would put 0xC3 0xA9 on the wire instead, and the
+      // upstream would read a different value than the client sent.
+      { method: 'GET', path: '/', headers: [['Host', 'h'], ['X-Note', 'caf\u00e9']], body: undefined },
+    );
+    fake.respond('HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n');
+    fake.endResponse();
+    await promise;
+
+    const written = fake.written();
+    const idx = written.indexOf(0xe9);
+    expect(idx).toBeGreaterThan(0);
+    // Preceded by 'f' — i.e. the value is `caf` + one byte, with no 0xC3
+    // lead byte that a UTF-8 serialization would have inserted.
+    expect(written[idx - 1]).toBe(0x66);
+    expect(written.includes(0xc3)).toBe(false);
+  });
+
+  it('rejects a header value holding a code point that cannot be a wire byte, before taking the writer lock', async () => {
+    const fake = makeFakeDuplex();
+    await expect(fetchOnStream(
+      { readable: fake.readable, writable: fake.writable },
+      { method: 'GET', path: '/', headers: [['Host', 'h'], ['X-Note', '\u4e2d']], body: undefined },
+    )).rejects.toMatchObject({ name: 'HttpProtocolError', code: 'BAD_HEADERS' });
+
+    expect(() => {
+      const w = fake.writable.getWriter();
+      w.releaseLock();
+    }).not.toThrow();
+  });
+});

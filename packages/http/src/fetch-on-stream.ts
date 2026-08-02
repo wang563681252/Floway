@@ -1,8 +1,8 @@
 // Run an HTTP/1.1 request over an already-established duplex byte stream.
 
-import { concat, utf8Bytes } from './bytes.ts';
+import { concat } from './bytes.ts';
 import { HttpProtocolError } from './errors.ts';
-import { TCHAR, validateFieldValueBytes, validateRequestTargetBytes } from './grammar.ts';
+import { encodeHeadSectionBytes, TCHAR, validateFieldValueBytes, validateRequestTargetBytes } from './grammar.ts';
 import { parseHttpResponse, toWebResponse } from './parser.ts';
 import type { DuplexStream, HttpRequest, ReplayableBody } from './types.ts';
 
@@ -140,7 +140,7 @@ export const fetchOnStream = async (
   let head = requestLine;
   for (const [k, v] of headers) head += `${k}: ${v}\r\n`;
   head += '\r\n';
-  const headBytes = utf8Bytes(head);
+  const headBytes = encodeHeadSectionBytes(head, 'request head');
 
   const writer = stream.writable.getWriter();
   try {
