@@ -377,6 +377,32 @@ test('countTokens proxies the upstream measurement response as a plain result', 
   assertEquals(payload.model, 'claude-alias');
 });
 
+test('countTokens routes an OpenAI-Responses-only Copilot Sol candidate to the Anthropic Messages count endpoint', async () => {
+  installRepo();
+  const callAnthropicMessagesCountTokens = vi.fn(async (): Promise<ProviderCallResult> => ({
+    response: Response.json({ input_tokens: 24 }),
+    modelKey: 'gpt-5.6-sol',
+  }));
+  queueResolution([makeCandidate({
+    upstream: 'up_copilot',
+    kind: 'copilot',
+    modelId: 'gpt-5.6-sol',
+    endpoints: { openaiResponses: {} },
+    callAnthropicMessagesCountTokens,
+  })]);
+
+  const result = await anthropicMessagesServe.countTokens({
+    payload: makePayload({ model: 'claude-opus-5' }),
+    ctx: makeGatewayCtx(),
+    headers: new Headers(),
+  });
+
+  const plain = assertResultType(result, 'plain');
+  assertEquals(plain.status, 200);
+  assertEquals(JSON.parse(new TextDecoder().decode(plain.body)), { input_tokens: 24 });
+  assertEquals(callAnthropicMessagesCountTokens.mock.calls.length, 1);
+});
+
 test('countTokens renders model-missing as a 404 when no candidates are available', async () => {
   installRepo();
   queueResolution([]);

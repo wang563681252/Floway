@@ -1,3 +1,4 @@
+import { copilotModelSupportsAnthropicMessagesCountTokens } from './anthropic-messages-count-tokens.ts';
 import { chatFromCopilotRaw } from './chat-from-raw.ts';
 import { COMPACTION_TRIGGER, compactionResponse } from './compaction.ts';
 import { assertCopilotUpstreamRecord } from './config.ts';
@@ -138,6 +139,16 @@ const rawModelFor = (model: ProviderModel, endpoint: ModelEndpointKey, hints: Mo
   const rawModels = (model.providerData as CopilotProviderData).rawModels.filter(rawModel => rawModelSupportsEndpoint(rawModel, endpoint));
   if (rawModels.length === 0) {
     throw new Error(`Copilot provider exposed ${endpoint} for ${model.id}, but no raw variant supports that endpoint`);
+  }
+  return resolveCopilotRawModel({ object: 'list', data: rawModels }, model.id, hints) ?? rawModels[0];
+};
+
+const rawModelForAnthropicMessagesCountTokens = (model: ProviderModel, hints: ModelSelectionHints): CopilotRawModel => {
+  if (!copilotModelSupportsAnthropicMessagesCountTokens(model.id)) return rawModelFor(model, 'anthropicMessages', hints);
+
+  const rawModels = (model.providerData as CopilotProviderData).rawModels;
+  if (rawModels.length === 0) {
+    throw new Error(`Copilot provider exposed ${model.id}, but it has no raw model for Anthropic Messages token counting`);
   }
   return resolveCopilotRawModel({ object: 'list', data: rawModels }, model.id, hints) ?? rawModels[0];
 };
@@ -464,7 +475,7 @@ export const createCopilotProvider = (record: UpstreamRecord): Provider => {
     },
     callAnthropicMessagesCountTokens: async (model, body, signal, opts) => {
       const ctx = anthropicMessagesBoundaryContext(body, model, opts.headers, opts.anthropicBeta);
-      const rawModel = rawModelFor(model, 'anthropicMessages', {
+      const rawModel = rawModelForAnthropicMessagesCountTokens(model, {
         context1m: ctx.anthropicBeta.includes(CONTEXT_1M_BETA),
         reasoningEffort: anthropicMessagesReasoningEffort(body),
       });

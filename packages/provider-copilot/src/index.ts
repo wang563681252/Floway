@@ -12,6 +12,7 @@ export {
   exchangeCopilotToken,
 } from './auth.ts';
 export { fetchGitHubUser, pollGitHubDeviceFlow, startGitHubDeviceFlow } from './github-device-flow.ts';
+export { copilotModelSupportsAnthropicMessagesCountTokens } from './anthropic-messages-count-tokens.ts';
 export { normalizeGitHubHost } from './github-host.ts';
 export { pricingForCopilotPublicModelId } from './pricing.ts';
 export {

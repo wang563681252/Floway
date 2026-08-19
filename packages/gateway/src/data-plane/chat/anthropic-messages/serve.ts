@@ -1,5 +1,5 @@
 import { analyzeAnthropicMessagesAffinity } from './affinity/ingress.ts';
-import { anthropicMessagesAttempt, anthropicMessagesGenerateTarget, anthropicMessagesCountTokensTarget } from './attempt.ts';
+import { anthropicMessagesAttempt, anthropicMessagesGenerateTarget, canServeAnthropicMessagesCountTokens } from './attempt.ts';
 import { renderAnthropicMessagesFailure } from './errors.ts';
 import { enumerateModelCandidates } from '../../providers/resolution.ts';
 import { iterateCandidates } from '../../shared/iterate-candidates.ts';
@@ -69,7 +69,7 @@ export const anthropicMessagesServe = {
       scheduler: ctx.backgroundScheduler,
       runtimeLocation: ctx.runtimeLocation,
     });
-    const viable = enumerated.filter(c => anthropicMessagesCountTokensTarget.canServe(c.model.endpoints));
+    const viable = enumerated.filter(canServeAnthropicMessagesCountTokens);
     const selection = selectAffinityCandidates(viable, affinity);
     if ('kind' in selection) return renderAnthropicMessagesFailure(selection, 'countTokens');
     if (selection.candidates.length === 0) return renderAnthropicMessagesFailure(noViableCandidateFailure(sawModel, payload.model, failedUpstreams), 'countTokens');

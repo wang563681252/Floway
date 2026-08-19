@@ -15,6 +15,7 @@ import type { AnthropicMessagesPayload, AnthropicMessagesStreamEvent } from '@fl
 import type { ProtocolFrame } from '@floway-dev/protocols/common';
 import type { ModelCandidate, ExecuteResult, AnthropicMessagesUpstreamCallOptions, PlainResult } from '@floway-dev/provider';
 import { providerModelOf } from '@floway-dev/provider';
+import { copilotModelSupportsAnthropicMessagesCountTokens } from '@floway-dev/provider-copilot';
 import { translateAnthropicMessagesViaOpenAIChatCompletions, translateAnthropicMessagesViaOpenAIResponses } from '@floway-dev/translate';
 
 // `/v1/messages` generate prefers a native Anthropic Messages target, then the
@@ -24,6 +25,11 @@ export const anthropicMessagesGenerateTarget = chatTargetPicker(['anthropicMessa
 // `count_tokens` has no translation path — only a native Anthropic Messages target
 // satisfies the operation.
 export const anthropicMessagesCountTokensTarget = chatTargetPicker(['anthropicMessages']);
+
+export const canServeAnthropicMessagesCountTokens = (candidate: ModelCandidate): boolean =>
+  anthropicMessagesCountTokensTarget.canServe(candidate.model.endpoints)
+  || (candidate.provider.kind === 'copilot'
+    && copilotModelSupportsAnthropicMessagesCountTokens(providerModelOf(candidate).id));
 
 export interface AnthropicMessagesAttemptArgs {
   readonly payload: AnthropicMessagesPayload;
@@ -95,10 +101,12 @@ export const anthropicMessagesAttempt = {
     const payload = { ...sourcePayload, model: candidate.model.id };
     const headers = new Headers(sourceHeaders);
     headers.delete('anthropic-beta');
-    // `pick` here is contractually total — serve filtered with
-    // `anthropicMessagesCountTokensTarget.canServe`, so a non-anthropic-messages candidate is
-    // a contract breach.
-    const targetApi = anthropicMessagesCountTokensTarget.pick(candidate.model.endpoints);
+    // Keep the invocation on the Anthropic Messages lane for Copilot's
+    // OpenAI-Responses-advertised Sol model: the operation still uses
+    // /v1/messages/count_tokens and its Anthropic Messages interceptors.
+    const targetApi = canServeAnthropicMessagesCountTokens(candidate)
+      ? 'anthropicMessages'
+      : anthropicMessagesCountTokensTarget.pick(candidate.model.endpoints);
     const invocation: AnthropicMessagesInvocation = {
       payload,
       candidate,

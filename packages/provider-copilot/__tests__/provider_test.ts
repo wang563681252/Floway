@@ -537,7 +537,7 @@ test('per-model provider default beats operator upstream override — Claude < 4
   );
 });
 
-test('Copilot provider forces stream=true for streaming endpoints and leaves count-tokens/embeddings alone', async () => {
+test('Copilot provider forces stream=true for streaming endpoints and counts tokens for Responses-only Sol', async () => {
   const { copilotUpstream } = await setupCopilotTest();
   const instance = createCopilotProvider(copilotUpstream);
   const provider = instance.instance;
@@ -563,6 +563,7 @@ test('Copilot provider forces stream=true for streaming endpoints and leaves cou
           copilotModels([
             { id: 'gpt-chat', supported_endpoints: ['/chat/completions'] },
             { id: 'gpt-resp', supported_endpoints: ['/responses'] },
+            { id: 'gpt-5.6-sol', supported_endpoints: ['/responses'] },
             { id: 'claude-msg', supported_endpoints: ['/v1/messages'] },
             { id: 'emb-mini', supported_endpoints: ['/embeddings'] },
           ]),
@@ -590,10 +591,13 @@ test('Copilot provider forces stream=true for streaming endpoints and leaves cou
       const opts = noopUpstreamCallOptions();
       const anthropicMessagesOpts = noopAnthropicMessagesUpstreamCallOptions();
 
+      assertEquals(byId.get('gpt-5.6-sol')?.endpoints, { openaiResponses: {} });
+
       await provider.callOpenAIChatCompletions(byId.get('gpt-chat')!, { messages: [{ role: 'user', content: 'hi' }] }, undefined, opts);
       await provider.callOpenAIResponses(byId.get('gpt-resp')!, { input: [] }, 'generate', undefined, opts);
       await provider.callAnthropicMessages(byId.get('claude-msg')!, { max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }, undefined, anthropicMessagesOpts);
       await provider.callAnthropicMessagesCountTokens(byId.get('claude-msg')!, { max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }, undefined, anthropicMessagesOpts);
+      await provider.callAnthropicMessagesCountTokens(byId.get('gpt-5.6-sol')!, { max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }, undefined, anthropicMessagesOpts);
       await provider.callOpenAIEmbeddings(byId.get('emb-mini')!, { input: 'hi' }, undefined, opts);
     },
   );
