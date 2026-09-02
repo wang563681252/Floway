@@ -6,7 +6,7 @@ import { withToolArgumentWhitespaceAborted } from './abort-on-tool-argument-whit
 import { withInlineImagesCompressed } from './compress-images.ts';
 import { withEmptyNamespaceDescriptionsFilled } from './fill-empty-namespace-descriptions.ts';
 import { withStoreForcedFalse } from './force-store-false.ts';
-import { withCopilotOpenAIResponsesItemIdMembrane } from './item-id-membrane.ts';
+import { copilotOpenAIResponsesReplayState, withCopilotOpenAIResponsesItemIdMembrane } from './item-id-membrane.ts';
 import { withInitiatorHeaderSet } from './set-initiator-header.ts';
 import { withVisionHeaderSet } from './set-vision-header.ts';
 import { withImageGenerationStripped } from './strip-image-generation.ts';
@@ -21,13 +21,15 @@ import type { CopilotOpenAIResponsesBoundaryInterceptor } from './types.ts';
 // `ctx.headers` for the upstream call. Result mutators sit between: the
 // whitespace guard acts only on generate streams, while the item-id membrane
 // also normalizes the generated item in compact value envelopes.
-export const COPILOT_OPENAI_RESPONSES_BOUNDARY = [
+export { copilotOpenAIResponsesReplayState };
+
+export const createCopilotOpenAIResponsesBoundary = (rawModelId: string) => [
   withInlineImagesCompressed,
   withEmptyNamespaceDescriptionsFilled,
   withServiceTierStripped,
   withImageGenerationStripped,
   withStoreForcedFalse,
-  withCopilotOpenAIResponsesItemIdMembrane,
+  withCopilotOpenAIResponsesItemIdMembrane(rawModelId),
   withToolArgumentWhitespaceAborted,
   withVisionHeaderSet,
   withInitiatorHeaderSet,

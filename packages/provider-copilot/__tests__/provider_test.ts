@@ -1,6 +1,7 @@
 import { test, vi } from 'vitest';
 
 import { clearInProcessCopilotTokenCache } from '../src/auth.ts';
+import { wrapCopilotItemId } from '../src/interceptors/openai-responses/item-id-carrier.ts';
 import { emptyKnownModels, mergeKnownModels } from '../src/known-models.ts';
 import type { CopilotVariantIndex } from '../src/model-variants.ts';
 import { createCopilotProvider } from '../src/provider.ts';
@@ -8,6 +9,7 @@ import { readCopilotUpstreamState, type CopilotUpstreamState } from '../src/stat
 import type { CopilotRawModel } from '../src/types.ts';
 import { createInMemoryImageProcessor, initImageProcessor } from '@floway-dev/platform';
 import type { AnthropicMessagesPayload } from '@floway-dev/protocols/anthropic-messages';
+import { appendOpaqueTrailer, decodeOpaqueValue } from '@floway-dev/protocols/common';
 import type { UpstreamRecord } from '@floway-dev/provider';
 import { directFetcher, initProviderRepo } from '@floway-dev/provider';
 import { assertEquals, assertRejects, assertThrows, jsonResponse, noopAnthropicMessagesUpstreamCallOptions, noopUpstreamCallOptions, sseResponse, withMockedFetch } from '@floway-dev/test-utils';
@@ -1506,4 +1508,228 @@ test('Copilot provider merges the -fast raw variant and reaches it through servi
   assertEquals(listed, ['gpt-5.6-sol', 'grok-code-fast']);
   assertEquals(sent.map(body => body.model), ['gpt-5.6-sol', 'gpt-5.6-sol-fast', 'gpt-5.6-sol-fast', 'gpt-5.6-sol']);
   assertEquals(sent.every(body => !('service_tier' in body)), true);
+});
+
+test('Copilot provider replays encrypted reasoning through the raw model that produced it', async () => {
+  const { copilotUpstream } = await setupCopilotTest();
+  const provider = createCopilotProvider(copilotUpstream).instance;
+  const sent: Record<string, unknown>[] = [];
+  const rawReasoning = {
+    type: 'reasoning' as const,
+    id: 'rs_raw',
+    summary: [],
+    encrypted_content: 'opaque reasoning',
+  };
+  const completed = {
+    id: 'resp_raw',
+    object: 'response',
+    model: 'gpt-5.6-sol',
+    status: 'completed',
+    output: [rawReasoning],
+    error: null,
+    incomplete_details: null,
+  };
+
+  await withMockedFetch(
+    async request => {
+      const url = new URL(request.url);
+      if (url.hostname === 'update.code.visualstudio.com') return jsonResponse(['1.110.1']);
+      if (url.pathname === '/copilot_internal/v2/token') {
+        return jsonResponse({
+          token: 'copilot-access-token',
+          expires_at: 4102444800,
+          refresh_in: 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        });
+      }
+      if (url.pathname === '/models') {
+        return jsonResponse(copilotModels([
+          { id: 'gpt-5.6-sol', supported_endpoints: ['/responses'] },
+          { id: 'gpt-5.6-sol-fast', supported_endpoints: ['/responses'] },
+        ]));
+      }
+      if (url.pathname === '/responses') {
+        sent.push((await request.json()) as Record<string, unknown>);
+        if (sent.length === 1) {
+          return sseResponse(
+            sseEvent('response.output_item.added', { type: 'response.output_item.added', output_index: 0, item: rawReasoning })
+            + sseEvent('response.output_item.done', { type: 'response.output_item.done', output_index: 0, item: rawReasoning })
+            + sseEvent('response.completed', { type: 'response.completed', response: completed })
+            + sseDone(),
+          );
+        }
+        return sseResponse();
+      }
+      throw new Error(`Unhandled fetch ${request.url}`);
+    },
+    async () => {
+      const models = await provider.getProvidedModels(directFetcher);
+      const sol = models.find(model => model.id === 'gpt-5.6-sol')!;
+      const first = await provider.callOpenAIResponses(
+        sol,
+        { input: [] },
+        'generate',
+        undefined,
+        noopUpstreamCallOptions(),
+      );
+      if (!first.ok || first.action !== 'generate') throw new Error('expected first Copilot stream');
+
+      let publicReasoning;
+      for await (const frame of first.events) {
+        if (frame.type === 'event' && frame.event.type === 'response.output_item.done') {
+          publicReasoning = frame.event.item;
+        }
+      }
+      if (publicReasoning?.type !== 'reasoning') throw new Error('expected public reasoning item');
+
+      await provider.callOpenAIResponses(
+        sol,
+        { input: [publicReasoning], service_tier: 'priority' },
+        'generate',
+        undefined,
+        noopUpstreamCallOptions(),
+      );
+
+      await assertRejects(
+        () => provider.callOpenAIResponses(
+          sol,
+          {
+            input: [{
+              type: 'reasoning',
+              id: 'rs_public',
+              summary: [],
+              encrypted_content: wrapCopilotItemId('opaque', 'rs_raw', 'gpt-removed'),
+            }],
+          },
+          'generate',
+          undefined,
+          noopUpstreamCallOptions(),
+        ),
+        Error,
+        'replay state requires unavailable raw model gpt-removed',
+      );
+    },
+  );
+
+  assertEquals(sent.map(body => body.model), ['gpt-5.6-sol', 'gpt-5.6-sol']);
+  assertEquals((sent[1]?.input as unknown[])[0], rawReasoning);
+});
+
+test('Copilot provider retries another raw lane for an unpinned legacy encrypted item', async () => {
+  const { copilotUpstream } = await setupCopilotTest();
+  const provider = createCopilotProvider(copilotUpstream).instance;
+  const sentModels: unknown[] = [];
+  const original = decodeOpaqueValue('opaque reasoning');
+  const legacyCarrier = appendOpaqueTrailer(original, new TextEncoder().encode(JSON.stringify({
+    version: 1,
+    origin: original.origin,
+    id: 'rs_raw',
+  })));
+
+  await withMockedFetch(
+    async request => {
+      const url = new URL(request.url);
+      if (url.hostname === 'update.code.visualstudio.com') return jsonResponse(['1.110.1']);
+      if (url.pathname === '/copilot_internal/v2/token') {
+        return jsonResponse({
+          token: 'copilot-access-token',
+          expires_at: 4102444800,
+          refresh_in: 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        });
+      }
+      if (url.pathname === '/models') {
+        return jsonResponse(copilotModels([
+          { id: 'gpt-5.6-sol', supported_endpoints: ['/responses'] },
+          { id: 'gpt-5.6-sol-fast', supported_endpoints: ['/responses'] },
+        ]));
+      }
+      if (url.pathname === '/responses') {
+        const body = (await request.json()) as Record<string, unknown>;
+        sentModels.push(body.model);
+        if (body.model === 'gpt-5.6-sol-fast') {
+          return jsonResponse({
+            error: {
+              message: 'The encrypted content for item rs_public could not be verified. Reason: Encrypted content could not be decrypted or parsed.',
+            },
+          }, 400);
+        }
+        return sseResponse();
+      }
+      throw new Error(`Unhandled fetch ${request.url}`);
+    },
+    async () => {
+      const models = await provider.getProvidedModels(directFetcher);
+      const sol = models.find(model => model.id === 'gpt-5.6-sol')!;
+      const result = await provider.callOpenAIResponses(
+        sol,
+        {
+          input: [{ type: 'reasoning', id: 'rs_public', summary: [], encrypted_content: legacyCarrier }],
+          service_tier: 'priority',
+        },
+        'generate',
+        undefined,
+        noopUpstreamCallOptions(),
+      );
+      if (!result.ok) throw new Error('expected the base-lane retry to succeed');
+    },
+  );
+
+  assertEquals(sentModels, ['gpt-5.6-sol-fast', 'gpt-5.6-sol']);
+});
+
+test('Copilot provider does not retry another raw lane for an unrelated upstream error', async () => {
+  const { copilotUpstream } = await setupCopilotTest();
+  const provider = createCopilotProvider(copilotUpstream).instance;
+  let calls = 0;
+  const original = decodeOpaqueValue('opaque reasoning');
+  const legacyCarrier = appendOpaqueTrailer(original, new TextEncoder().encode(JSON.stringify({
+    version: 1,
+    origin: original.origin,
+    id: 'rs_raw',
+  })));
+
+  await withMockedFetch(
+    async request => {
+      const url = new URL(request.url);
+      if (url.hostname === 'update.code.visualstudio.com') return jsonResponse(['1.110.1']);
+      if (url.pathname === '/copilot_internal/v2/token') {
+        return jsonResponse({
+          token: 'copilot-access-token',
+          expires_at: 4102444800,
+          refresh_in: 3600,
+          endpoints: { api: 'https://api.individual.githubcopilot.com' },
+        });
+      }
+      if (url.pathname === '/models') {
+        return jsonResponse(copilotModels([
+          { id: 'gpt-5.6-sol', supported_endpoints: ['/responses'] },
+          { id: 'gpt-5.6-sol-fast', supported_endpoints: ['/responses'] },
+        ]));
+      }
+      if (url.pathname === '/responses') {
+        calls += 1;
+        return jsonResponse({ error: { message: 'rate limited' } }, 429);
+      }
+      throw new Error(`Unhandled fetch ${request.url}`);
+    },
+    async () => {
+      const models = await provider.getProvidedModels(directFetcher);
+      const sol = models.find(model => model.id === 'gpt-5.6-sol')!;
+      const result = await provider.callOpenAIResponses(
+        sol,
+        {
+          input: [{ type: 'reasoning', id: 'rs_public', summary: [], encrypted_content: legacyCarrier }],
+          service_tier: 'priority',
+        },
+        'generate',
+        undefined,
+        noopUpstreamCallOptions(),
+      );
+      if (result.ok) throw new Error('expected upstream error');
+      assertEquals(result.response.status, 429);
+    },
+  );
+
+  assertEquals(calls, 1);
 });

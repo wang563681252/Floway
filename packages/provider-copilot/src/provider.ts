@@ -9,7 +9,7 @@ import { COPILOT_ANTHROPIC_MESSAGES_BOUNDARY, COPILOT_ANTHROPIC_MESSAGES_COUNT_T
 import type { AnthropicMessagesBoundaryCtx } from './interceptors/anthropic-messages/types.ts';
 import { COPILOT_OPENAI_CHAT_COMPLETIONS_BOUNDARY } from './interceptors/openai-chat-completions/index.ts';
 import type { OpenAIChatCompletionsBoundaryCtx } from './interceptors/openai-chat-completions/types.ts';
-import { COPILOT_OPENAI_RESPONSES_BOUNDARY } from './interceptors/openai-responses/index.ts';
+import { copilotOpenAIResponsesReplayState, createCopilotOpenAIResponsesBoundary } from './interceptors/openai-responses/index.ts';
 import type { OpenAIResponsesBoundaryCtx } from './interceptors/openai-responses/types.ts';
 import { emptyKnownModels, mergeKnownModels, projectKnownModels } from './known-models.ts';
 import { mergeCopilotVariants } from './merge-variants.ts';
@@ -141,6 +141,43 @@ const rawModelFor = (model: ProviderModel, endpoint: ModelEndpointKey, hints: Mo
     throw new Error(`Copilot provider exposed ${endpoint} for ${model.id}, but no raw variant supports that endpoint`);
   }
   return resolveCopilotRawModel({ object: 'list', data: rawModels }, model.id, hints) ?? rawModels[0];
+};
+
+const rawModelForReplay = (model: ProviderModel, endpoint: ModelEndpointKey, rawModelId: string): CopilotRawModel => {
+  const rawModel = (model.providerData as CopilotProviderData).rawModels.find(candidate =>
+    candidate.id === rawModelId && rawModelSupportsEndpoint(candidate, endpoint));
+  if (rawModel === undefined) {
+    throw new Error(`Copilot ${model.id} replay state requires unavailable raw model ${rawModelId}`);
+  }
+  return rawModel;
+};
+
+const rawModelReplayCandidates = (
+  model: ProviderModel,
+  endpoint: ModelEndpointKey,
+  selected: CopilotRawModel,
+): readonly CopilotRawModel[] => [
+  selected,
+  ...(model.providerData as CopilotProviderData).rawModels.filter(candidate =>
+    candidate.id !== selected.id && rawModelSupportsEndpoint(candidate, endpoint)),
+];
+
+// Legacy carriers emitted before Floway recorded the selected raw lane cannot
+// identify whether a merged model used its base or Fast Mode variant. Retry
+// another family lane only for Copilot's explicit encrypted-state rejection;
+// all other upstream failures remain byte-for-byte passthroughs.
+// https://platform.openai.com/docs/guides/reasoning#encrypted-reasoning-items
+const isEncryptedReplayFailure = async (result: ProviderOpenAIResponsesResult): Promise<boolean> => {
+  if (result.ok) return false;
+  try {
+    const body = await result.response.clone().json() as { error?: { message?: unknown } };
+    const message = body.error?.message;
+    return typeof message === 'string'
+      && message.includes('encrypted content for item')
+      && message.includes('could not be verified');
+  } catch {
+    return false;
+  }
 };
 
 const rawModelForAnthropicMessagesCountTokens = (model: ProviderModel, hints: ModelSelectionHints): CopilotRawModel => {
@@ -372,16 +409,13 @@ export const createCopilotProvider = (record: UpstreamRecord): Provider => {
       // `billableUsageFromOpenAIResponsesResult` prices that one.
       // https://github.com/openai/codex/issues/32191
       // https://learn.microsoft.com/en-sg/answers/questions/5921564/we-send-service-tier-priority-on-a-gpt-4-1-mini-gl
-      const rawModel = rawModelFor(model, 'openaiResponses', {
-        reasoningEffort: openaiResponsesReasoningEffort(body),
-        fast: isFastServiceTier(body.service_tier),
-      });
-      const ctx: OpenAIResponsesBoundaryCtx = {
-        payload: { ...body, model: model.id },
-        headers: new Headers(opts.headers),
-        model,
-        action,
-      };
+      const replay = copilotOpenAIResponsesReplayState(body);
+      const rawModel = replay.rawModelId === undefined
+        ? rawModelFor(model, 'openaiResponses', {
+            reasoningEffort: openaiResponsesReasoningEffort(body),
+            fast: isFastServiceTier(body.service_tier),
+          })
+        : rawModelForReplay(model, 'openaiResponses', replay.rawModelId);
       // Single chain wraps both branches; the terminal dispatches on
       // `ctx.action` (the post-chain value), so a mid-chain interceptor can
       // flip it and steer dispatch end-to-end. Copilot has no native
@@ -393,34 +427,52 @@ export const createCopilotProvider = (record: UpstreamRecord): Provider => {
       // compression, vision/initiator headers — applies to both branches
       // identically. The item-id membrane also normalizes the compact value
       // envelope, while the whitespace guard only inspects generate streams.
-      return await runInterceptors<OpenAIResponsesBoundaryCtx, object, ProviderOpenAIResponsesResult>(
-        ctx, {}, COPILOT_OPENAI_RESPONSES_BOUNDARY, async () => {
-          const { model: _ignored, ...wireBody } = ctx.payload;
-          switch (ctx.action) {
-          case 'generate': {
-            const stream = await callStreaming(copilotFetchOpenAIResponses, wireBody, signal, rawModel, [...ctx.headers], parseOpenAIResponsesStream, opts);
-            return stream.ok
-              ? { action: 'generate', ok: true, events: stream.events, modelKey: stream.modelKey, ...(stream.headers ? { headers: stream.headers } : {}) }
-              : { action: 'generate', ok: false, response: stream.response, modelKey: stream.modelKey };
-          }
-          case 'compact': {
-            const input = wireBody.input;
-            const triggered = { ...wireBody, input: [...input, COMPACTION_TRIGGER], stream: false, model: rawModel.id };
-            const response = await copilotFetchOpenAIResponses(
-              upstreamConfig,
-              { method: 'POST', body: jsonRequestBody(triggered), signal },
-              { extraHeaders: [...ctx.headers], fetcher: opts.fetcher, wrapUpstreamCall: opts.wrapUpstreamCall, waitUntil: opts.waitUntil },
-            );
-            if (!response.ok) return { action: 'compact', ok: false, response, modelKey: rawModel.id };
-            const generated = (await response.json()) as OpenAIResponsesResult;
-            return { action: 'compact', ok: true, result: compactionResponse(input, generated), modelKey: rawModel.id };
-          }
-          default:
+      const callRawModel = async (candidateRawModel: CopilotRawModel): Promise<ProviderOpenAIResponsesResult> => {
+        const ctx: OpenAIResponsesBoundaryCtx = {
+          payload: { ...body, model: model.id },
+          headers: new Headers(opts.headers),
+          model,
+          action,
+        };
+        return await runInterceptors<OpenAIResponsesBoundaryCtx, object, ProviderOpenAIResponsesResult>(
+          ctx, {}, createCopilotOpenAIResponsesBoundary(candidateRawModel.id), async () => {
+            const { model: _ignored, ...wireBody } = ctx.payload;
+            switch (ctx.action) {
+            case 'generate': {
+              const stream = await callStreaming(copilotFetchOpenAIResponses, wireBody, signal, candidateRawModel, [...ctx.headers], parseOpenAIResponsesStream, opts);
+              return stream.ok
+                ? { action: 'generate', ok: true, events: stream.events, modelKey: stream.modelKey, ...(stream.headers ? { headers: stream.headers } : {}) }
+                : { action: 'generate', ok: false, response: stream.response, modelKey: stream.modelKey };
+            }
+            case 'compact': {
+              const input = wireBody.input;
+              const triggered = { ...wireBody, input: [...input, COMPACTION_TRIGGER], stream: false, model: candidateRawModel.id };
+              const response = await copilotFetchOpenAIResponses(
+                upstreamConfig,
+                { method: 'POST', body: jsonRequestBody(triggered), signal },
+                { extraHeaders: [...ctx.headers], fetcher: opts.fetcher, wrapUpstreamCall: opts.wrapUpstreamCall, waitUntil: opts.waitUntil },
+              );
+              if (!response.ok) return { action: 'compact', ok: false, response, modelKey: candidateRawModel.id };
+              const generated = (await response.json()) as OpenAIResponsesResult;
+              return { action: 'compact', ok: true, result: compactionResponse(input, generated), modelKey: candidateRawModel.id };
+            }
+            default:
             ctx.action satisfies never;
-            throw new Error(`Unhandled OpenAIResponsesAction: ${ctx.action as string}`);
-          }
-        },
-      );
+              throw new Error(`Unhandled OpenAIResponsesAction: ${ctx.action as string}`);
+            }
+          },
+        );
+      };
+
+      const candidates = replay.hasLegacyCarrier && replay.rawModelId === undefined
+        ? rawModelReplayCandidates(model, 'openaiResponses', rawModel)
+        : [rawModel];
+      let result = await callRawModel(candidates[0]);
+      for (const candidateRawModel of candidates.slice(1)) {
+        if (!await isEncryptedReplayFailure(result)) break;
+        result = await callRawModel(candidateRawModel);
+      }
+      return result;
     },
     callAnthropicMessages: async (model, body, signal, opts) => {
       // Fast Mode is a hard contract on the request side: Anthropic returns

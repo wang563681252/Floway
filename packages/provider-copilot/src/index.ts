@@ -15,6 +15,7 @@ export { fetchGitHubUser, pollGitHubDeviceFlow, startGitHubDeviceFlow } from './
 export { copilotModelSupportsAnthropicMessagesCountTokens } from './anthropic-messages-count-tokens.ts';
 export { normalizeGitHubHost } from './github-host.ts';
 export { pricingForCopilotPublicModelId } from './pricing.ts';
+export { copilotModelMatchesReplayTarget, upgradeCopilotOpenAIResponsesReplayCarrier } from './replay-affinity.ts';
 export {
   fetchCopilotUsage,
   projectCopilotSeat,

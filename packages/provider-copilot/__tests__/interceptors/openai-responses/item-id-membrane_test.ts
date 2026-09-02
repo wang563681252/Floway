@@ -1,12 +1,14 @@
 import { expect, test } from 'vitest';
 
 import { unwrapCopilotItemId, wrapCopilotItemId } from '../../../src/interceptors/openai-responses/item-id-carrier.ts';
-import { withCopilotOpenAIResponsesItemIdMembrane } from '../../../src/interceptors/openai-responses/item-id-membrane.ts';
+import { copilotOpenAIResponsesReplayState, withCopilotOpenAIResponsesItemIdMembrane } from '../../../src/interceptors/openai-responses/item-id-membrane.ts';
 import type { OpenAIResponsesBoundaryCtx } from '../../../src/interceptors/openai-responses/types.ts';
 import { doneFrame, eventFrame, type ProtocolFrame } from '@floway-dev/protocols/common';
 import { openaiResponsesResultToEvents, type OpenAIResponsesInputItem, type OpenAIResponsesOutputItem, type OpenAIResponsesResult, type OpenAIResponsesStreamEvent } from '@floway-dev/protocols/openai-responses';
 import type { ProviderOpenAIResponsesResult } from '@floway-dev/provider';
 import { stubProviderModel } from '@floway-dev/test-utils';
+
+const RAW_MODEL_ID = 'gpt-test-raw';
 
 const invocation = (input: OpenAIResponsesInputItem[] = []): OpenAIResponsesBoundaryCtx => ({
   payload: {
@@ -53,7 +55,7 @@ const runStream = async (
   const iterable = Symbol.asyncIterator in frames
     ? frames as AsyncIterable<ProtocolFrame<OpenAIResponsesStreamEvent>>
     : (async function* () { yield* frames as ProtocolFrame<OpenAIResponsesStreamEvent>[]; })();
-  const result = await withCopilotOpenAIResponsesItemIdMembrane(ctx, {}, () => Promise.resolve({
+  const result = await withCopilotOpenAIResponsesItemIdMembrane(RAW_MODEL_ID)(ctx, {}, () => Promise.resolve({
     action: 'generate',
     ok: true,
     events: iterable,
@@ -154,9 +156,10 @@ test('normalizes each reasoning lifecycle observation with its own upstream id a
   expect(unwrapCopilotItemId(doneEvent.item.encrypted_content!)).toEqual({
     kind: 'owned',
     value: 'opaque done',
-    version: 1,
+    version: 2,
     origin: 'raw',
     id: 'rs_done',
+    rawModelId: RAW_MODEL_ID,
   });
   const completedItem = completed.response.output[0];
   expect(completedItem.id).toBe(publicId);
@@ -386,25 +389,25 @@ test('carries program and nested agent-message ids in every available blob', asy
 
 test('restores owned blob ids for Copilot input and leaves foreign items unchanged', async () => {
   const input: OpenAIResponsesInputItem[] = [
-    { type: 'reasoning', id: 'rs_public', summary: [], encrypted_content: wrapCopilotItemId('reasoning state', 'rs_raw') },
-    { type: 'program', id: 'cm_public', call_id: 'call_program', code: 'return 1', fingerprint: wrapCopilotItemId('program state', 'cm_raw') },
+    { type: 'reasoning', id: 'rs_public', summary: [], encrypted_content: wrapCopilotItemId('reasoning state', 'rs_raw', RAW_MODEL_ID) },
+    { type: 'program', id: 'cm_public', call_id: 'call_program', code: 'return 1', fingerprint: wrapCopilotItemId('program state', 'cm_raw', RAW_MODEL_ID) },
     {
       type: 'agent_message',
       id: 'amsg_public',
       author: 'a',
       recipient: 'b',
       content: [
-        { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('one', 'amsg_raw') },
-        { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('two', 'amsg_raw') },
+        { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('one', 'amsg_raw', RAW_MODEL_ID) },
+        { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('two', 'amsg_raw', RAW_MODEL_ID) },
       ],
     },
-    { type: 'compaction', id: 'cmp_public', encrypted_content: wrapCopilotItemId('compact state', 'cmp_raw') },
+    { type: 'compaction', id: 'cmp_public', encrypted_content: wrapCopilotItemId('compact state', 'cmp_raw', RAW_MODEL_ID) },
     { type: 'reasoning', id: 'rs_foreign', summary: [], encrypted_content: 'foreign state' },
     { type: 'message', id: 'msg_foreign', role: 'user', content: 'hello' },
   ];
   const ctx = invocation(input);
   let wireInput: OpenAIResponsesInputItem[] | undefined;
-  await withCopilotOpenAIResponsesItemIdMembrane(ctx, {}, () => {
+  await withCopilotOpenAIResponsesItemIdMembrane(RAW_MODEL_ID)(ctx, {}, () => {
     wireInput = structuredClone(ctx.payload.input);
     return Promise.resolve({
       action: 'generate',
@@ -433,6 +436,23 @@ test('restores owned blob ids for Copilot input and leaves foreign items unchang
   ]);
 });
 
+test('recovers one replay raw model and rejects input carrying multiple lanes', () => {
+  const reasoning = (rawModelId: string): OpenAIResponsesInputItem => ({
+    type: 'reasoning',
+    id: 'rs_public',
+    summary: [],
+    encrypted_content: wrapCopilotItemId('state', 'rs_raw', rawModelId),
+  });
+
+  expect(copilotOpenAIResponsesReplayState({ input: [reasoning('gpt-base'), reasoning('gpt-base')] })).toEqual({
+    rawModelId: 'gpt-base',
+    hasLegacyCarrier: false,
+  });
+  expect(() => copilotOpenAIResponsesReplayState({
+    input: [reasoning('gpt-base'), reasoning('gpt-fast')],
+  })).toThrow(/conflicting raw model ids/);
+});
+
 test('rejects conflicting ids carried by one input item', async () => {
   const ctx = invocation([{
     type: 'agent_message',
@@ -440,12 +460,12 @@ test('rejects conflicting ids carried by one input item', async () => {
     author: 'a',
     recipient: 'b',
     content: [
-      { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('one', 'amsg_one') },
-      { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('two', 'amsg_two') },
+      { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('one', 'amsg_one', RAW_MODEL_ID) },
+      { type: 'encrypted_content', encrypted_content: wrapCopilotItemId('two', 'amsg_two', RAW_MODEL_ID) },
     ],
   }]);
 
-  await expect(withCopilotOpenAIResponsesItemIdMembrane(ctx, {}, () => {
+  await expect(withCopilotOpenAIResponsesItemIdMembrane(RAW_MODEL_ID)(ctx, {}, () => {
     throw new Error('must not reach upstream');
   })).rejects.toThrow(/conflicting upstream ids/);
 });
@@ -455,7 +475,7 @@ test('normalizes the generated compaction item without touching retained compact
     { type: 'message', id: 'msg_retained', status: 'completed', role: 'assistant', content: [] },
     { type: 'compaction', id: 'cmp_raw', encrypted_content: 'compact state' },
   ]);
-  const result = await withCopilotOpenAIResponsesItemIdMembrane(invocation(), {}, () => Promise.resolve({
+  const result = await withCopilotOpenAIResponsesItemIdMembrane(RAW_MODEL_ID)(invocation(), {}, () => Promise.resolve({
     action: 'compact',
     ok: true,
     result: compactResult,

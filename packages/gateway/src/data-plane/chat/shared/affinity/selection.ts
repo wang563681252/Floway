@@ -4,9 +4,12 @@ import type { AffinityTarget, DecodedAffinityBlob } from './carrier.ts';
 import type { ChatServeFailure } from '../errors.ts';
 import type { ModelCandidate } from '@floway-dev/provider';
 
+export type AffinityTargetMatcher = (candidate: ModelCandidate, target: AffinityTarget) => boolean;
+
 export interface AffinityRequestAnalysis<T> {
   readonly requiredTargets: readonly AffinityTarget[];
   readonly evaluateCandidate: (candidate: ModelCandidate) => CandidateAffinityEvaluation<T>;
+  readonly candidateSatisfiesTarget: AffinityTargetMatcher;
 }
 
 export type CandidateAffinityEvaluation<T> =
@@ -31,9 +34,12 @@ export type RequiredAffinityBlobProjection =
 const sameRequiredTarget = (left: AffinityTarget, right: AffinityTarget): boolean =>
   left.upstreamId === right.upstreamId && left.modelId === right.modelId;
 
-const candidateMatchesExactTarget = (candidate: ModelCandidate, affinity: AffinityTarget): boolean =>
-  candidate.provider.upstreamId === affinity.upstreamId
-  && candidate.model.id === affinity.modelId
+const candidateMatchesExactTarget = (
+  candidate: ModelCandidate,
+  affinity: AffinityTarget,
+  candidateSatisfiesTarget: AffinityTargetMatcher,
+): boolean =>
+  candidateSatisfiesTarget(candidate, affinity)
   // Alias targets always carry a rules object, while direct candidates omit
   // it. Both shapes describe the same no-overlay variant when the object is
   // empty, which lets a pre-alias session follow its real binding after a
@@ -46,9 +52,10 @@ export const candidateSatisfiesAffinityTarget = (candidate: ModelCandidate, targ
 export const projectOptionalAffinityBlob = (
   decoded: DecodedAffinityBlob,
   candidate: ModelCandidate,
+  candidateSatisfiesTarget: AffinityTargetMatcher = candidateSatisfiesAffinityTarget,
 ): OptionalAffinityBlobProjection => {
   if (decoded.kind === 'foreign') return { kind: 'preserve', value: decoded.value };
-  const compatible = candidateMatchesExactTarget(candidate, decoded.affinity);
+  const compatible = candidateMatchesExactTarget(candidate, decoded.affinity, candidateSatisfiesTarget);
   if (!compatible || decoded.value === undefined) return { kind: 'remove', degrades: decoded.value !== undefined };
   return { kind: 'preserve', value: decoded.value };
 };
@@ -56,9 +63,10 @@ export const projectOptionalAffinityBlob = (
 export const projectRequiredAffinityBlob = (
   decoded: DecodedAffinityBlob,
   candidate: ModelCandidate,
+  candidateSatisfiesTarget: AffinityTargetMatcher = candidateSatisfiesAffinityTarget,
 ): RequiredAffinityBlobProjection => {
   if (decoded.kind === 'foreign') return { kind: 'preserve', value: decoded.value };
-  if (!candidateSatisfiesAffinityTarget(candidate, decoded.affinity)) return { kind: 'reject', requiredTarget: decoded.affinity };
+  if (!candidateSatisfiesTarget(candidate, decoded.affinity)) return { kind: 'reject', requiredTarget: decoded.affinity };
   if (decoded.value === undefined) return { kind: 'remove', degrades: false };
   return { kind: 'preserve', value: decoded.value };
 };
@@ -66,6 +74,7 @@ export const projectRequiredAffinityBlob = (
 export const defineAffinityRequest = <T>(
   requiredTargets: readonly AffinityTarget[],
   evaluate: (candidate: ModelCandidate) => CandidateAffinityEvaluation<T>,
+  candidateSatisfiesTarget: AffinityTargetMatcher = candidateSatisfiesAffinityTarget,
 ): AffinityRequestAnalysis<T> => {
   const uniqueRequiredTargets: AffinityTarget[] = [];
   for (const target of requiredTargets) {
@@ -74,11 +83,12 @@ export const defineAffinityRequest = <T>(
   const evaluations = new WeakMap<ModelCandidate, CandidateAffinityEvaluation<T>>();
   return {
     requiredTargets: uniqueRequiredTargets,
+    candidateSatisfiesTarget,
     evaluateCandidate: candidate => {
       const existing = evaluations.get(candidate);
       if (existing !== undefined) return existing;
       const candidateEvaluation = evaluate(candidate);
-      const satisfiesRequirements = uniqueRequiredTargets.every(target => candidateSatisfiesAffinityTarget(candidate, target));
+      const satisfiesRequirements = uniqueRequiredTargets.every(target => candidateSatisfiesTarget(candidate, target));
       if ((candidateEvaluation.kind === 'accepted') !== satisfiesRequirements) {
         throw new Error('Affinity candidate evaluation disagrees with the request requirement analysis');
       }
@@ -105,13 +115,6 @@ export const selectAffinityCandidates = <T>(
   candidates: readonly ModelCandidate[],
   affinity: AffinityRequestAnalysis<T>,
 ): AffinityCandidateSelection<T> | AffinitySelectionFailure => {
-  if (affinity.requiredTargets.length > 1) {
-    return {
-      kind: 'routing-unavailable',
-      message: `Client-carried state requires multiple incompatible targets: ${affinity.requiredTargets.map(target => `'${target.upstreamId}/${target.modelId}'`).join(', ')}.`,
-    };
-  }
-
   const accepted: Array<{
     readonly candidate: ModelCandidate;
     readonly evaluation: Extract<CandidateAffinityEvaluation<T>, { kind: 'accepted' }>;
@@ -119,6 +122,12 @@ export const selectAffinityCandidates = <T>(
   for (const candidate of candidates) {
     const evaluation = affinity.evaluateCandidate(candidate);
     if (evaluation.kind === 'accepted') accepted.push({ candidate, evaluation });
+  }
+  if (affinity.requiredTargets.length > 1 && accepted.length === 0) {
+    return {
+      kind: 'routing-unavailable',
+      message: `Client-carried state requires multiple incompatible targets: ${affinity.requiredTargets.map(target => `'${target.upstreamId}/${target.modelId}'`).join(', ')}.`,
+    };
   }
   if (affinity.requiredTargets.length === 1 && accepted.length === 0) {
     const [required] = affinity.requiredTargets;

@@ -3,6 +3,7 @@ import { expect, test } from 'vitest';
 import { analyzeOpenAIResponsesAffinity } from '../../../../../src/data-plane/chat/openai-responses/affinity/ingress.ts';
 import { AffinityCodec, type AffinityRequestAnalysis, type AffinityTarget, selectAffinityCandidates } from '../../../../../src/data-plane/chat/shared/affinity/index.ts';
 import { acceptedAffinityEvaluation } from '../../shared/affinity/helpers.ts';
+import { appendOpaqueTrailer, decodeOpaqueValue } from '@floway-dev/protocols/common';
 import type { CanonicalOpenAIResponsesPayload } from '@floway-dev/protocols/openai-responses';
 import type { ModelCandidate } from '@floway-dev/provider';
 import { stubModelCandidate } from '@floway-dev/test-utils';
@@ -27,6 +28,29 @@ const targetFor = (value: ModelCandidate): AffinityTarget => ({
 
 const candidateA = candidate('upstream-a');
 const candidateB = candidate('upstream-b');
+
+const legacyCopilotCarrier = (value: string, id: string): string => {
+  const original = decodeOpaqueValue(value);
+  return appendOpaqueTrailer(original, new TextEncoder().encode(JSON.stringify({
+    version: 1,
+    origin: original.origin,
+    id,
+  })));
+};
+
+const mergedCopilotCandidate = (): ModelCandidate => {
+  const base = stubModelCandidate();
+  return stubModelCandidate({
+    provider: { ...base.provider, upstreamId: 'upstream-copilot', kind: 'copilot' },
+    model: { id: 'gpt-5.6-sol', endpoints: { openaiResponses: {} } },
+    providerData: {
+      rawModels: [
+        { id: 'gpt-5.6-sol', supported_endpoints: ['/responses'] },
+        { id: 'gpt-5.6-sol-fast', supported_endpoints: ['/responses'] },
+      ],
+    },
+  });
+};
 
 const select = (
   candidates: readonly ModelCandidate[],
@@ -105,6 +129,52 @@ test('restores an owned blob only for its exact target without changing item ids
   expect(projectionA.degrades).toBe(false);
   expect(mismatchedProjection.degrades).toBe(true);
   expect(select([mismatchedRules, candidateA], prepared).candidates).toEqual([candidateA, mismatchedRules]);
+});
+
+test('restores state from a Copilot fast model that is now a lane of its merged family', async () => {
+  const copilot = mergedCopilotCandidate();
+  const legacyTarget = {
+    upstreamId: copilot.provider.upstreamId,
+    modelId: 'gpt-5.6-sol-fast',
+  };
+  const innerCarrier = legacyCopilotCarrier('opaque reasoning', 'rs_upstream');
+  const carrier = await codec.wrap(
+    innerCarrier,
+    legacyTarget,
+    carrierDomain('reasoning', 'encrypted_content'),
+  );
+  const prepared = await analyzeOpenAIResponsesAffinity({
+    model: 'gpt-5.6-sol',
+    input: [{ type: 'reasoning', id: 'rs_public', summary: [], encrypted_content: carrier }],
+  }, codec);
+
+  const projection = acceptedAffinityEvaluation(prepared, copilot);
+  expect(projection.degrades).toBe(false);
+  const materialized = projection.materialize().input[0] as { encrypted_content: string };
+  expect(materialized.encrypted_content).not.toBe(innerCarrier);
+});
+
+test('accepts required state that spans the old fast id and its current merged family', async () => {
+  const copilot = mergedCopilotCandidate();
+  const oldFast = await codec.wrap(
+    legacyCopilotCarrier('old fast state', 'cmp_fast'),
+    { upstreamId: copilot.provider.upstreamId, modelId: 'gpt-5.6-sol-fast' },
+    carrierDomain('compaction', 'encrypted_content'),
+  );
+  const currentBase = await codec.wrap(
+    'current base state',
+    { upstreamId: copilot.provider.upstreamId, modelId: 'gpt-5.6-sol' },
+    carrierDomain('compaction', 'encrypted_content'),
+  );
+  const prepared = await analyzeOpenAIResponsesAffinity({
+    model: 'gpt-5.6-sol',
+    input: [
+      { type: 'compaction', id: 'cmp_old', encrypted_content: oldFast },
+      { type: 'compaction', id: 'cmp_current', encrypted_content: currentBase },
+    ],
+  }, codec);
+
+  expect(select([copilot], prepared).candidates).toEqual([copilot]);
 });
 
 test('rewrites nested agent-message carriers and preserves foreign values', async () => {

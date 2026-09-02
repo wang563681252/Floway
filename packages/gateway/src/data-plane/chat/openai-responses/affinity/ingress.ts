@@ -2,7 +2,6 @@ import {
   type AffinityCodec,
   type AffinityRequestAnalysis,
   type AffinityTarget,
-  candidateSatisfiesAffinityTarget,
   type DecodedAffinityBlob,
   defineAffinityRequest,
   type OptionalAffinityBlobProjection,
@@ -11,6 +10,8 @@ import {
 } from '../../shared/affinity/index.ts';
 import type { CanonicalOpenAIResponsesPayload, OpenAIResponsesInputItem } from '@floway-dev/protocols/openai-responses';
 import type { ModelCandidate } from '@floway-dev/provider';
+import { providerModelOf } from '@floway-dev/provider';
+import { copilotModelMatchesReplayTarget, upgradeCopilotOpenAIResponsesReplayCarrier } from '@floway-dev/provider-copilot';
 
 interface OpenAIResponsesBlobLocation {
   readonly itemIndex: number;
@@ -39,6 +40,36 @@ interface OpenAIResponsesBlobCandidateProjection {
   readonly location: OpenAIResponsesBlobLocation;
   readonly projection: OptionalAffinityBlobProjection;
 }
+
+const candidateSatisfiesOpenAIResponsesTarget = (
+  candidate: ModelCandidate,
+  target: AffinityTarget,
+): boolean =>
+  candidate.provider.upstreamId === target.upstreamId
+  && (candidate.model.id === target.modelId
+    || (candidate.provider.kind === 'copilot'
+      && copilotModelMatchesReplayTarget(providerModelOf(candidate), target.modelId)));
+
+const upgradeLegacyCopilotReplayCarrier = (
+  projection: OptionalAffinityBlobProjection,
+  decoded: DecodedAffinityBlob,
+  candidate: ModelCandidate,
+): OptionalAffinityBlobProjection => {
+  if (
+    projection.kind !== 'preserve'
+    || decoded.kind !== 'owned'
+    || candidate.provider.kind !== 'copilot'
+    || candidate.model.id === decoded.affinity.modelId
+  ) return projection;
+  return {
+    kind: 'preserve',
+    value: upgradeCopilotOpenAIResponsesReplayCarrier(
+      projection.value,
+      providerModelOf(candidate),
+      decoded.affinity.modelId,
+    ),
+  };
+};
 
 const canonicalItemType = (itemType: string): string =>
   itemType === 'compaction_summary' ? 'compaction' : itemType;
@@ -178,18 +209,19 @@ const evaluateOpenAIResponsesCandidate = (
   for (const item of analysis.items) {
     if (
       item.inheritedRequiredTarget !== undefined
-      && !candidateSatisfiesAffinityTarget(candidate, item.inheritedRequiredTarget)
+      && !candidateSatisfiesOpenAIResponsesTarget(candidate, item.inheritedRequiredTarget)
     ) unsatisfiedTargets.push(item.inheritedRequiredTarget);
 
     const projections: OpenAIResponsesBlobCandidateProjection[] = [];
     for (const blob of item.blobs) {
-      const projection = blob.required
-        ? projectRequiredAffinityBlob(blob.decoded, candidate)
-        : projectOptionalAffinityBlob(blob.decoded, candidate);
-      if (projection.kind === 'reject') {
-        unsatisfiedTargets.push(projection.requiredTarget);
+      const rawProjection = blob.required
+        ? projectRequiredAffinityBlob(blob.decoded, candidate, candidateSatisfiesOpenAIResponsesTarget)
+        : projectOptionalAffinityBlob(blob.decoded, candidate, candidateSatisfiesOpenAIResponsesTarget);
+      if (rawProjection.kind === 'reject') {
+        unsatisfiedTargets.push(rawProjection.requiredTarget);
         continue;
       }
+      const projection = upgradeLegacyCopilotReplayCarrier(rawProjection, blob.decoded, candidate);
       if (!item.synthetic && projection.kind === 'remove') degrades ||= projection.degrades;
       projections.push({ location: blob, projection });
     }
@@ -217,5 +249,6 @@ export const analyzeOpenAIResponsesAffinity = async (
   return defineAffinityRequest(
     analysis.requiredTargets,
     candidate => evaluateOpenAIResponsesCandidate(payload, analysis, candidate),
+    candidateSatisfiesOpenAIResponsesTarget,
   );
 };

@@ -23,7 +23,10 @@ vi.mock('../../../src/interceptors/openai-responses/index.ts', async () => {
   const original = await vi.importActual<typeof import('../../../src/interceptors/openai-responses/index.ts')>('../../../src/interceptors/openai-responses/index.ts');
   return {
     ...original,
-    COPILOT_OPENAI_RESPONSES_BOUNDARY: [...original.COPILOT_OPENAI_RESPONSES_BOUNDARY, pivotCompactToGenerate],
+    createCopilotOpenAIResponsesBoundary: (rawModelId: string) => [
+      ...original.createCopilotOpenAIResponsesBoundary(rawModelId),
+      pivotCompactToGenerate,
+    ],
   };
 });
 

@@ -94,6 +94,36 @@ const restoreInputItemIds = (payload: CanonicalOpenAIResponsesPayload): Canonica
   input: payload.input.map(restoreInputItem),
 });
 
+export interface CopilotOpenAIResponsesReplayState {
+  readonly rawModelId?: string;
+  readonly hasLegacyCarrier: boolean;
+}
+
+export const copilotOpenAIResponsesReplayState = (
+  payload: Pick<CanonicalOpenAIResponsesPayload, 'input'>,
+): CopilotOpenAIResponsesReplayState => {
+  const rawModelIds = new Set<string>();
+  let hasLegacyCarrier = false;
+  for (const item of payload.input) {
+    mapCarrierValues(item, value => {
+      const decoded = unwrapCopilotItemId(value);
+      if (decoded.kind === 'owned') {
+        if (decoded.version === 2) rawModelIds.add(decoded.rawModelId);
+        else hasLegacyCarrier = true;
+      }
+      return value;
+    });
+  }
+  if (rawModelIds.size > 1) {
+    throw new TypeError('Copilot OpenAI Responses input carries conflicting raw model ids');
+  }
+  const rawModelId = rawModelIds.values().next().value;
+  return {
+    ...(rawModelId !== undefined ? { rawModelId } : {}),
+    hasLegacyCarrier,
+  };
+};
+
 const carrierValueCount = (item: OpenAIResponsesOutputItem): number => {
   let count = 0;
   mapCarrierValues(item, value => {
@@ -103,7 +133,11 @@ const carrierValueCount = (item: OpenAIResponsesOutputItem): number => {
   return count;
 };
 
-const normalizeObservedItem = (item: OpenAIResponsesOutputItem, publicId: string): OpenAIResponsesOutputItem => {
+const normalizeObservedItem = (
+  item: OpenAIResponsesOutputItem,
+  publicId: string,
+  rawModelId: string,
+): OpenAIResponsesOutputItem => {
   copilotOutputItemType(item);
   if (carrierValueCount(item) === 0) return { ...item, id: publicId } as OpenAIResponsesOutputItem;
 
@@ -112,7 +146,7 @@ const normalizeObservedItem = (item: OpenAIResponsesOutputItem, publicId: string
     throw new TypeError(`Copilot OpenAI Responses ${item.type} item has replay state but no upstream id`);
   }
   return {
-    ...mapCarrierValues(item, value => wrapCopilotItemId(value, upstreamId)),
+    ...mapCarrierValues(item, value => wrapCopilotItemId(value, upstreamId, rawModelId)),
     id: publicId,
   } as OpenAIResponsesOutputItem;
 };
@@ -154,13 +188,14 @@ const trackObservedItem = (
 const normalizeResponseOutput = (
   response: OpenAIResponsesResult,
   state: StreamItemState,
+  rawModelId: string,
 ): OpenAIResponsesResult => {
   if (response.output.length === 0) return response;
   return {
     ...response,
     output: response.output.map((item, outputIndex) => {
       const tracked = trackObservedItem(state, outputIndex, item);
-      return normalizeObservedItem(item, tracked.publicId);
+      return normalizeObservedItem(item, tracked.publicId, rawModelId);
     }),
   };
 };
@@ -198,19 +233,23 @@ const NO_ITEM_ID_EVENT_TYPES = new Set<OpenAIResponsesStreamEvent['type']>([
   'response.shell_call_command.done',
 ]);
 
-const normalizeStreamEvent = (event: OpenAIResponsesStreamEvent, state: StreamItemState): OpenAIResponsesStreamEvent => {
+const normalizeStreamEvent = (
+  event: OpenAIResponsesStreamEvent,
+  state: StreamItemState,
+  rawModelId: string,
+): OpenAIResponsesStreamEvent => {
   if (event.type === 'response.output_item.added') {
     const tracked = trackObservedItem(state, event.output_index, event.item);
     if (tracked.added) {
       throw new TypeError(`Copilot OpenAI Responses emitted output_item.added twice for output_index ${event.output_index}`);
     }
     tracked.added = true;
-    return { ...event, item: normalizeObservedItem(event.item, tracked.publicId) };
+    return { ...event, item: normalizeObservedItem(event.item, tracked.publicId, rawModelId) };
   }
 
   if (event.type === 'response.output_item.done') {
     const tracked = trackObservedItem(state, event.output_index, event.item);
-    return { ...event, item: normalizeObservedItem(event.item, tracked.publicId) };
+    return { ...event, item: normalizeObservedItem(event.item, tracked.publicId, rawModelId) };
   }
 
   if (
@@ -221,7 +260,7 @@ const normalizeStreamEvent = (event: OpenAIResponsesStreamEvent, state: StreamIt
     || event.type === 'response.incomplete'
     || event.type === 'response.failed'
   ) {
-    return { ...event, response: normalizeResponseOutput(event.response, state) };
+    return { ...event, response: normalizeResponseOutput(event.response, state, rawModelId) };
   }
 
   if (event.type === 'error') return event;
@@ -251,29 +290,35 @@ const normalizeStreamEvent = (event: OpenAIResponsesStreamEvent, state: StreamIt
 
 const normalizeFrames = async function* (
   frames: AsyncIterable<ProtocolFrame<OpenAIResponsesStreamEvent>>,
+  rawModelId: string,
 ): AsyncGenerator<ProtocolFrame<OpenAIResponsesStreamEvent>> {
   const state: StreamItemState = { items: new Map() };
   for await (const frame of frames) {
     yield frame.type === 'event'
-      ? { ...frame, event: normalizeStreamEvent(frame.event, state) }
+      ? { ...frame, event: normalizeStreamEvent(frame.event, state, rawModelId) }
       : frame;
   }
 };
 
-const normalizeCompactionResult = (response: OpenAIResponsesCompactionResult): OpenAIResponsesCompactionResult => ({
+const normalizeCompactionResult = (
+  response: OpenAIResponsesCompactionResult,
+  rawModelId: string,
+): OpenAIResponsesCompactionResult => ({
   ...response,
   output: response.output.map(item => {
     if (item.type !== 'compaction') return item;
-    return normalizeObservedItem(item, createPublicItemId('compaction'));
+    return normalizeObservedItem(item, createPublicItemId('compaction'), rawModelId);
   }),
 });
 
-export const withCopilotOpenAIResponsesItemIdMembrane: CopilotOpenAIResponsesBoundaryInterceptor = async (ctx, _env, run) => {
+export const withCopilotOpenAIResponsesItemIdMembrane = (
+  rawModelId: string,
+): CopilotOpenAIResponsesBoundaryInterceptor => async (ctx, _env, run) => {
   ctx.payload = restoreInputItemIds(ctx.payload);
   const result = await run();
   if (!result.ok) return result;
 
   return result.action === 'generate'
-    ? { ...result, events: normalizeFrames(result.events) }
-    : { ...result, result: normalizeCompactionResult(result.result) };
+    ? { ...result, events: normalizeFrames(result.events, rawModelId) }
+    : { ...result, result: normalizeCompactionResult(result.result, rawModelId) };
 };
