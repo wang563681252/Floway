@@ -1,5 +1,6 @@
 services:
-  web:
+  server:
     ports: !override
-      - "127.0.0.1:${FLOWAY_WEB_PORT:-18088}:80"
-      - "0.0.0.0:80:80"
+      - "127.0.0.1:${FLOWAY_SERVER_PORT:-8788}:8788"
+      - "127.0.0.1:${FLOWAY_WEB_PORT:-18088}:8788"
+      - "0.0.0.0:80:8788"

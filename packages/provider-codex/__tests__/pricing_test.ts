@@ -90,3 +90,62 @@ test('Codex gpt-5.4 and gpt-5.4-mini keep their explicit flex and priority entri
 test('pricingForCodexModelKey returns null for an unknown slug', () => {
   assertEquals(pricingForCodexModelKey('totally-made-up-model'), null);
 });
+
+test('Codex GPT-6 Astra resolves the announced standard, priority and flex rate grid', () => {
+  const pricing = pricingForCodexModelKey('gpt-6-astra');
+  const cases = [
+    [{ inputTokens: 272000 }, { input_tokens: '10', input_cache_read_tokens: '1', input_cache_write_tokens: '12.5', output_tokens: '50' }],
+    [{ inputTokens: 272001 }, { input_tokens: '20', input_cache_read_tokens: '2', input_cache_write_tokens: '25', output_tokens: '75' }],
+    [{ serviceTier: 'priority', inputTokens: 272000 }, { input_tokens: '20', input_cache_read_tokens: '2', input_cache_write_tokens: '25', output_tokens: '100' }],
+    [{ serviceTier: 'priority', inputTokens: 272001 }, { input_tokens: '40', input_cache_read_tokens: '4', input_cache_write_tokens: '50', output_tokens: '150' }],
+    [{ serviceTier: 'flex', inputTokens: 272000 }, { input_tokens: '5', input_cache_read_tokens: '0.5', input_cache_write_tokens: '6.25', output_tokens: '25' }],
+    [{ serviceTier: 'flex', inputTokens: 272001 }, { input_tokens: '10', input_cache_read_tokens: '1', input_cache_write_tokens: '12.5', output_tokens: '37.5' }],
+  ] as const;
+
+  for (const [facts, rates] of cases) {
+    assertEquals(priceRequest(pricing, facts).rates, published(rates));
+  }
+});
+
+test('Codex GPT-6.1 Sol resolves its lower cache rate across every published tier and context band', () => {
+  const pricing = pricingForCodexModelKey('gpt-6.1-sol');
+  const cases = [
+    [{ inputTokens: 272000 }, { input_tokens: '2', input_cache_read_tokens: '0.1', input_cache_write_tokens: '2.5', output_tokens: '10' }],
+    [{ inputTokens: 272001 }, { input_tokens: '4', input_cache_read_tokens: '0.2', input_cache_write_tokens: '5', output_tokens: '15' }],
+    [{ serviceTier: 'priority', inputTokens: 272000 }, { input_tokens: '4', input_cache_read_tokens: '0.2', input_cache_write_tokens: '5', output_tokens: '20' }],
+    [{ serviceTier: 'priority', inputTokens: 272001 }, { input_tokens: '8', input_cache_read_tokens: '0.4', input_cache_write_tokens: '10', output_tokens: '30' }],
+    [{ serviceTier: 'flex', inputTokens: 272000 }, { input_tokens: '1', input_cache_read_tokens: '0.05', input_cache_write_tokens: '1.25', output_tokens: '5' }],
+    [{ serviceTier: 'flex', inputTokens: 272001 }, { input_tokens: '2', input_cache_read_tokens: '0.1', input_cache_write_tokens: '2.5', output_tokens: '7.5' }],
+  ] as const;
+
+  for (const [facts, rates] of cases) {
+    assertEquals(priceRequest(pricing, facts).rates, published(rates));
+  }
+  assertEquals(pricingForCodexModelKey('gpt-6.1-sol-fast'), null);
+});
+
+test('Codex GPT-6 Sol and Luna resolve every published service tier and context band', () => {
+  const cases = {
+    'gpt-6-sol': [
+      [{ inputTokens: 272000 }, { input_tokens: '2', input_cache_read_tokens: '0.2', input_cache_write_tokens: '2.5', output_tokens: '10' }],
+      [{ inputTokens: 272001 }, { input_tokens: '4', input_cache_read_tokens: '0.4', input_cache_write_tokens: '5', output_tokens: '15' }],
+      [{ serviceTier: 'priority', inputTokens: 272000 }, { input_tokens: '4', input_cache_read_tokens: '0.4', input_cache_write_tokens: '5', output_tokens: '20' }],
+      [{ serviceTier: 'priority', inputTokens: 272001 }, { input_tokens: '8', input_cache_read_tokens: '0.8', input_cache_write_tokens: '10', output_tokens: '30' }],
+      [{ serviceTier: 'flex', inputTokens: 272000 }, { input_tokens: '1', input_cache_read_tokens: '0.1', input_cache_write_tokens: '1.25', output_tokens: '5' }],
+      [{ serviceTier: 'flex', inputTokens: 272001 }, { input_tokens: '2', input_cache_read_tokens: '0.2', input_cache_write_tokens: '2.5', output_tokens: '7.5' }],
+    ],
+    'gpt-6-luna': [
+      [{ inputTokens: 272000 }, { input_tokens: '0.1', input_cache_read_tokens: '0.01', input_cache_write_tokens: '0.125', output_tokens: '0.5' }],
+      [{ inputTokens: 272001 }, { input_tokens: '0.2', input_cache_read_tokens: '0.02', input_cache_write_tokens: '0.25', output_tokens: '0.75' }],
+      [{ serviceTier: 'priority', inputTokens: 272000 }, { input_tokens: '0.2', input_cache_read_tokens: '0.02', input_cache_write_tokens: '0.25', output_tokens: '1' }],
+      [{ serviceTier: 'priority', inputTokens: 272001 }, { input_tokens: '0.4', input_cache_read_tokens: '0.04', input_cache_write_tokens: '0.5', output_tokens: '1.5' }],
+      [{ serviceTier: 'flex', inputTokens: 272000 }, { input_tokens: '0.05', input_cache_read_tokens: '0.005', input_cache_write_tokens: '0.0625', output_tokens: '0.25' }],
+      [{ serviceTier: 'flex', inputTokens: 272001 }, { input_tokens: '0.1', input_cache_read_tokens: '0.01', input_cache_write_tokens: '0.125', output_tokens: '0.375' }],
+    ],
+  } as const;
+
+  for (const [id, grid] of Object.entries(cases)) {
+    const pricing = pricingForCodexModelKey(id);
+    for (const [facts, rates] of grid) assertEquals(priceRequest(pricing, facts).rates, published(rates));
+  }
+});

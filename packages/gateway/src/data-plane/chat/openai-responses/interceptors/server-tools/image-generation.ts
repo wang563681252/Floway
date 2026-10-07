@@ -1,7 +1,8 @@
 import { sleep } from '../../../../../shared/sleep.ts';
 import { enumerateModelCandidates } from '../../../../providers/resolution.ts';
+import { stampUpstreamCallStart } from '../../../../shared/attempt-timing.ts';
 import { appendFailedUpstreams } from '../../../../shared/failed-upstreams.ts';
-import { stampUpstreamCallStart, type AttemptState } from '../../../../shared/gateway-ctx.ts';
+import type { AttemptState } from '../../../../shared/gateway-ctx.ts';
 import { recordPerformance, type PerformanceTelemetryContext } from '../../../../shared/telemetry/performance.ts';
 import { recordTokenUsage, tokenUsageFromOpenAIImagesBody } from '../../../../shared/telemetry/usage.ts';
 import { createExternalImageFetcher, type ExternalImageFetchResult } from '../../../shared/external-image-loader.ts';
@@ -9,6 +10,7 @@ import type { ServerToolLifecycleEvent, ServerToolOutputItem, ServerToolRegistra
 import { dimensionsFromBytes, getImageProcessor, type BackgroundScheduler } from '@floway-dev/platform';
 import { decodeForgivingBase64, encodeHex, isImageMediaType, mediaTypeEssence, parseSSEStream } from '@floway-dev/protocols/common';
 import {
+  collectOpenAIResponsesToolEntries,
   createRandomOpenAIResponsesItemId,
   type OpenAIResponsesFunctionCallOutputItem,
   type OpenAIResponsesFunctionTool,
@@ -316,16 +318,16 @@ const integerInRange = (value: unknown, param: string, min: number, max: number)
   return null;
 };
 
-// Validate one hosted `image_generation` entry against the public OpenAI Responses
-// surface and project it into the shim's config. Every hosted entry is
-// validated (not just the last) so an earlier entry's bad field is rejected
-// rather than masked by a later valid one — matching Azure's per-entry
-// strictness with concrete `tools[i].field` paths.
+// Validate one hosted `image_generation` declaration against the fields and
+// values supported by this shim. The caller validates every
+// declaration before selecting the last config, so an earlier invalid entry
+// fails. toolPath identifies its source carrier in the error.
+// https://developers.openai.com/api/docs/guides/tools-image-generation
 const validateHostedImageGenerationEntry = (
   tool: OpenAIResponsesHostedTool,
-  index: number,
+  toolPath: string,
 ): { ok: true; config: ImageGenerationConfig } | { ok: false; error: PrepareConfigError } => {
-  const path = (field: string): string => `tools[${index}].${field}`;
+  const path = (field: string): string => `${toolPath}.${field}`;
 
   // Reject any field outside the public surface (Azure-strict). This
   // subsumes `n` (absent from KNOWN_TOOL_FIELDS) and any typo'd / unsupported
@@ -440,13 +442,16 @@ const validateHostedImageGenerationEntry = (
   };
 };
 
-// Validate every hosted `image_generation` entry; the LAST entry's config
-// wins (most-recent declaration).
-export const prepareImageGenerationConfig = (tools: readonly OpenAIResponsesTool[]): PrepareConfigResult => {
+// Validate every hosted `image_generation` entry; the last one in the
+// collected declaration order supplies the active config.
+export const prepareImageGenerationConfig = (
+  tools: readonly OpenAIResponsesTool[],
+  paths: readonly string[] = tools.map((_, index) => `tools[${index}]`),
+): PrepareConfigResult => {
   let config: ImageGenerationConfig | undefined;
   for (const [i, tool] of tools.entries()) {
     if (!isHostedImageGenerationTool(tool)) continue;
-    const validated = validateHostedImageGenerationEntry(tool, i);
+    const validated = validateHostedImageGenerationEntry(tool, paths[i]);
     if (!validated.ok) return validated;
     config = validated.config;
   }
@@ -1090,7 +1095,7 @@ const issueImageCall = async (
       // Perf recording lives at the sub-call's terminal boundary in
       // streamImageGeneration; the retry loop overwrites this slot each
       // retry so it reflects the dispatch that actually returned.
-      wrapUpstreamCall: stampUpstreamCallStart(attempt),
+      wrapUpstreamCall: stampUpstreamCallStart(attempt.timing),
     };
     const { response, modelKey } = await (editRequest === null
       ? provider.instance.callOpenAIImagesGenerations(model, buildGenerationsBody(prompt, config, stream), state.downstreamAbortSignal, opts)
@@ -1244,7 +1249,7 @@ const streamImageGeneration = (
   const model = providerModelOf(resolved.candidate);
   const wantsPartials = (state.config.partial_images ?? 0) > 0;
 
-  const attempt: AttemptState = { upstreamCallStartedAt: null, firstOutputTokenAt: null, telemetry: undefined };
+  const attempt: AttemptState = { timing: { upstreamCallStartedAt: null, firstOutputTokenAt: null }, telemetry: undefined };
   const perfContext: PerformanceTelemetryContext = {
     keyId: state.apiKeyId,
     model: model.id,
@@ -1395,7 +1400,8 @@ export const imageGenerationServerTool: ServerToolRegistration = async (invocati
     return { type: 'inactive' };
   }
 
-  const tools = Array.isArray(invocation.payload.tools) ? invocation.payload.tools : [];
+  const declarations = collectOpenAIResponsesToolEntries(invocation.payload);
+  const tools = declarations.map(entry => entry.tool);
   const hasHostedTool = tools.some(isHostedImageGenerationTool);
   const hasReplayInput = invocation.payload.input.some(i => i.type === 'image_generation_call');
   if (!hasHostedTool && !hasReplayInput) return { type: 'inactive' };
@@ -1410,7 +1416,7 @@ export const imageGenerationServerTool: ServerToolRegistration = async (invocati
     };
   }
 
-  const prepared = prepareImageGenerationConfig(tools);
+  const prepared = prepareImageGenerationConfig(tools, declarations.map(entry => entry.path));
   if (!prepared.ok) {
     return { type: 'invalid-request', message: prepared.error.message, param: prepared.error.param, code: prepared.error.code };
   }

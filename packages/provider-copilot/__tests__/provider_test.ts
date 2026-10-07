@@ -985,7 +985,7 @@ test('Copilot provider throws "disappeared mid-request" when the upstream row va
 test('Copilot provider swallows a saveState throw so a transient persistence hiccup does not invalidate the fetched models', async () => {
   // Persistence is best-effort: the fetched models are the user-facing
   // payload, and a storage-level error on the write must not propagate out of
-  // getProvidedModels. Mirrors the gateway SWR layer's persistence policy.
+  // getProvidedModels. Mirrors the gateway's persisted catalog policy.
   const harness = await setupCopilotTest();
   harness.overrideSaveState(() => Promise.reject(new Error('D1 hiccup')));
 
@@ -1355,6 +1355,15 @@ test('Copilot chat field: vision-only → modalities with image input', async ()
     { id: 'gpt-vision', supports: { vision: true } },
   ]);
   assertEquals(model.chat, { modalities: { input: ['text', 'image'], output: ['text'] } });
+});
+
+test('Copilot OpenAI models share one upstream-bound opaque blob scope', async () => {
+  const [openai, anthropic] = await getModelsWithCapabilities([
+    { id: 'gpt-5' },
+    { id: 'claude-opus-5', supported_endpoints: ['/v1/messages'] },
+  ]);
+  assertEquals(openai.opaqueBlobCompatibilityScope, { bindToUpstream: true, key: 'openai' });
+  assertEquals(anthropic.opaqueBlobCompatibilityScope, { bindToUpstream: true });
 });
 
 test('Copilot chat field: reasoning_effort with medium → effort with default medium', async () => {

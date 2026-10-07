@@ -3,7 +3,7 @@
 ## Scope
 
 Deploy the current Floway source to an existing Linux VM over SSH. Reuse the
-Node server, Nginx dashboard, and SQLite/files volume from
+Node service with its bundled dashboard and SQLite/files volume from
 [docker-compose.yml](docker-compose.yml). No new Azure managed services are
 required. This preparation does not provision resources, change Cloudflare,
 export credentials, or switch clients.
@@ -11,7 +11,9 @@ export credentials, or switch clients.
 The VM configuration is the base Compose file plus
 [azure-vm.compose.yml](azure-vm.compose.yml). It adds release-specific image
 tags, bounded container logs, the `AZURE` runtime location, and loopback-only
-host ports. Its `!override` port replacement requires Docker Compose 2.24.4+
+host ports. Both historical loopback ports point to the same Node service;
+`FLOWAY_WEB_PORT` remains the dashboard-port configuration name for existing
+tunnels and ingress. Its `!override` port replacement requires Docker Compose 2.24.4+
 ([Compose merge rules](https://docs.docker.com/reference/compose-file/merge/#replace-value)).
 
 ## Server Details Needed
@@ -51,10 +53,11 @@ Start from [azure-vm.env.example](azure-vm.env.example). Set a fresh, random
 environment file in source control or a release archive. Avoid printing the
 resolved Compose environment because it contains the administrator secret.
 
-Build from the current working-tree contents, including the uncommitted GPT-6
-pricing and tool fixes. A plain clone or `git archive HEAD` would omit these.
-Assemble transfer archives from an explicit source inventory, including these
-deployment files. Exclude `.git`, credentials, `wrangler.jsonc`, `.wrangler`,
+Build from the reviewed integration commit that includes the local pricing,
+tool, installer, and deployment changes. If further uncommitted changes are
+required, review and commit them before preparing a release. Assemble transfer
+archives from an explicit source inventory, including these deployment files.
+Exclude `.git`, credentials, `wrangler.jsonc`, `.wrangler`,
 environment files, `node_modules`, local databases, backups, personal files,
 and unrelated untracked debug scripts. Verify an archive SHA-256 before and
 after transfer. Do not upload the workspace directory indiscriminately.
@@ -78,7 +81,10 @@ curl --fail --show-error http://127.0.0.1:18088/api/health
 curl --fail --show-error --output /dev/null http://127.0.0.1:18088/
 ```
 
-The server applies migrations on startup. The stable project name keeps the
+Only the `server` application image is built; it includes the dashboard assets.
+The server applies migrations on startup, including request-dump and upstream
+configuration-version migrations 0084 and 0085. Back up the database and files
+before starting the new image. The stable project name keeps the
 data volume at `floway_floway-data` across release directories. Never use
 `docker compose down -v` or prune this volume. Containers restart automatically,
 but the host must also start Docker after reboot.
@@ -92,7 +98,8 @@ ssh -N -L 18088:127.0.0.1:18088 -p <ssh-port> <ssh-user>@<ssh-host>
 ```
 
 Visit `http://localhost:18088`. Choose another local tunnel port if it is busy.
-Both gateway and dashboard ports remain bound to `127.0.0.1` on the VM.
+Both gateway and dashboard ports remain bound to `127.0.0.1` on the VM and
+serve the same Node application.
 
 ### Public HTTP By IP
 
@@ -102,8 +109,9 @@ scripts are not protected against interception or modification in transit.
 
 To enable HTTP after accepting that tradeoff, add
 [azure-vm.http.compose.yml](azure-vm.http.compose.yml). It publishes host TCP 80
-through the existing Nginx service and retains both loopback ports. It does not
-restart the server or change the data volume:
+through the Node service and retains both loopback ports. Changing these
+bindings recreates the server container and briefly interrupts in-flight
+requests, but retains the data volume:
 
 ```bash
 compose_http() {
@@ -115,7 +123,7 @@ compose_http() {
 }
 
 compose_http config --quiet
-compose_http up -d --no-build --no-deps --wait --wait-timeout 180 web
+compose_http up -d --no-build --no-deps --wait --wait-timeout 180 server
 ```
 
 Open `http://<VM-public-IP>` after allowing inbound TCP 80 for this VM. Open
@@ -125,8 +133,8 @@ Verify the external homepage and health endpoint, and that protected APIs still
 reject unauthenticated requests. Do not expose 8788 or 18088 publicly.
 
 Use `compose_http` for subsequent HTTP deployments. To return to private-only
-access, run `compose up -d --no-build --no-deps --wait web` with the original
-two-file helper. This changes only the web bindings; it does not roll back data.
+access, run `compose up -d --no-build --no-deps --wait server` with the original
+two-file helper. This changes the server's published bindings, not its data.
 
 ### Public HTTPS
 
@@ -134,10 +142,10 @@ If the VM already has an HTTPS ingress, keep it and proxy to
 `http://127.0.0.1:18088`. Otherwise, use
 [azure-vm.https.compose.yml](azure-vm.https.compose.yml) and
 [Caddyfile.azure-vm](Caddyfile.azure-vm). Caddy owns public TCP 80/443 and
-forwards both the dashboard and API traffic to the existing `web:80` container.
+forwards both the dashboard and API traffic to the `server:8788` container.
 It preserves Host, supports WebSocket upgrades, flushes SSE immediately, and
-keeps client cancellation enabled. Nginx retains the internal gateway routing
-and long-response settings in [nginx.conf](nginx.conf).
+keeps client cancellation enabled. Node owns both static dashboard serving and
+gateway routing.
 
 A purchased domain is not required. Set a DNS name label on the VM's Azure
 public IP resource and use the exact FQDN shown in the portal, typically
@@ -166,15 +174,16 @@ compose_https config --quiet
 compose_https pull caddy
 compose_https run --rm --no-deps --interactive=false -T caddy \
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-compose_https up -d --no-build --no-deps --wait --wait-timeout 180 web
+compose_https up -d --no-build --no-deps --wait --wait-timeout 180 server
 compose_https up -d --no-build --no-deps --wait --wait-timeout 180 caddy
 compose_https logs --tail 100 caddy
 ```
 
 Do not include the HTTP overlay in this helper. When switching from public
-HTTP, recreating only `web` releases port 80 before Caddy starts; the server
-container and `floway_floway-data` volume are unchanged. Expect a brief ingress
-interruption. Resolve any unrelated 80/443 listener before this cutover.
+HTTP, recreating `server` releases its public port 80 before Caddy starts.
+The `floway_floway-data` volume is retained, but existing requests are
+interrupted during the server recreation. Resolve any unrelated 80/443
+listener before this cutover.
 
 Caddy [automatically obtains and renews certificates](https://caddyserver.com/docs/automatic-https).
 Its ACME account and certificates persist in `floway_floway-caddy-data`; retain
@@ -193,10 +202,10 @@ address. Confirm backend ports remain private. Update client base URLs and
 regenerate Agent Setup commands from the HTTPS origin only after acceptance.
 
 For an ingress-only rollback, stop Caddy with `compose_https stop caddy`, then
-run `compose up -d --no-build --no-deps --wait web` for private access, or
-`compose_http up -d --no-build --no-deps --wait web` to restore the explicitly
-insecure HTTP option. Keep the certificate volumes; no database restore or
-server restart is involved.
+run `compose up -d --no-build --no-deps --wait server` for private access, or
+`compose_http up -d --no-build --no-deps --wait server` to restore the explicitly
+insecure HTTP option. Keep the certificate volumes. The server is recreated
+with new bindings, but an ingress-only rollback does not restore the database.
 
 Allow SSH only from the operator's IP or through an existing private/Bastion
 path. Open 80/443 only for the chosen ingress; do not open 8788/18088 in
@@ -266,21 +275,27 @@ Encrypt backups, restrict access, and retain a copy off the VM.
 
 Retain the previous release's source, image tags, environment settings and data
 backup. To roll back code, select its `FLOWAY_RELEASE` and run
-`compose up -d --no-build --wait`. If migrations changed the schema, restore the
+`compose up -d --no-build --wait` using that release's Compose files. Releases
+before dashboard consolidation require their original `web` image and Caddy
+target; do not combine those files with the single-service image. If migrations changed the schema, restore the
 matching data backup while stopped before using older code. Do not restore an
 old snapshot over newer production writes without an explicit recovery decision.
 
 ## Preparation Checks
 
-Compose validation must confirm exactly one loopback port per service in the
-private baseline. The optional HTTP overlay must add only TCP 80 to the web
-service, preserving all other configuration. The HTTPS overlay must keep those
+Compose validation must confirm exactly one application service with both
+loopback ports pointing to container port 8788 in the private baseline. The
+optional HTTP overlay must add only public TCP 80 to that service, preserving
+both private ports. The HTTPS overlay must keep those
 backend ports private, publish TCP 80/443 only through Caddy, retain persistent
 certificate storage, and reject an empty `FLOWAY_DOMAIN`. Verify data mounts,
 server health dependency, bounded logs, unique image tags, and rejection of an
-empty `ADMIN_KEY`. Build and run both application images for source deployments;
-an ingress-only change reuses the running release's images without rebuilding
-or restarting the server. Configuration validation alone is not a container
+empty `ADMIN_KEY`. Build and run the bundled application image for source deployments;
+an ingress-only change reuses the running release's image without rebuilding,
+but recreates the server when its published bindings change. When moving from
+the old two-service layout, retire the old `web` container only after validating
+the new Node dashboard and Caddy target; never remove its data or certificate
+volumes. Configuration validation alone is not a container
 startup test.
 
 The workstation's Docker CLI can validate this configuration, but its Linux

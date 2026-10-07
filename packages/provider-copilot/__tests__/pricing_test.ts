@@ -194,3 +194,83 @@ test('conflicting prices on merged reasoning variants cannot silently overwrite 
     { id: 'claude-opus-4.8-high', billing: billing({ input_price: 1000, output_price: 2500 }) },
   ], 'claude-opus-4-8')).toThrow('conflicting variant prices');
 });
+
+test('Copilot GPT-6 Astra prices the standard short and long bands its catalog serves', () => {
+  const pricing = projection([{
+    id: 'gpt-6-astra',
+    billing: billing(
+      { input_price: 1000, cache_price: 100, cache_write_price: 1250, output_price: 5000, context_max: 272000 },
+      { input_price: 2000, cache_price: 200, cache_write_price: 2500, output_price: 7500, context_max: 1050000 },
+    ),
+  }]);
+  expect(priceRequest(pricing, { inputTokens: 272000 }).rates).toEqual(
+    published({ input_tokens: '10', input_cache_read_tokens: '1', input_cache_write_tokens: '12.5', output_tokens: '50' }),
+  );
+  expect(priceRequest(pricing, { inputTokens: 272001 }).rates).toEqual(
+    published({ input_tokens: '20', input_cache_read_tokens: '2', input_cache_write_tokens: '25', output_tokens: '75' }),
+  );
+  // Copilot publishes no accelerated Astra sibling and reports `default`, so
+  // an unserved tier falls back to Base rather than gaining an invented rate.
+  expect(priceRequest(pricing, { serviceTier: 'priority', inputTokens: 0 }).rates).toEqual(
+    published({ input_tokens: '10', input_cache_read_tokens: '1', input_cache_write_tokens: '12.5', output_tokens: '50' }),
+  );
+});
+
+test('Copilot GPT-6.1 Sol prices Standard and Fast bands only when their catalog cards exist', () => {
+  const pricing = projection([
+    sol,
+    {
+      id: 'gpt-6.1-sol-fast',
+      billing: billing(
+        { input_price: 400, cache_price: 20, cache_write_price: 500, output_price: 2000, context_max: 272000 },
+        { input_price: 800, cache_price: 40, cache_write_price: 1000, output_price: 3000, context_max: 922000 },
+      ),
+    },
+  ], sol.id);
+  const cases = [
+    [{ inputTokens: 272000 }, { input_tokens: '2', input_cache_read_tokens: '0.1', input_cache_write_tokens: '2.5', output_tokens: '10' }],
+    [{ inputTokens: 272001 }, { input_tokens: '4', input_cache_read_tokens: '0.2', input_cache_write_tokens: '5', output_tokens: '15' }],
+    [{ serviceTier: 'priority', inputTokens: 272000 }, { input_tokens: '4', input_cache_read_tokens: '0.2', input_cache_write_tokens: '5', output_tokens: '20' }],
+    [{ serviceTier: 'priority', inputTokens: 272001 }, { input_tokens: '8', input_cache_read_tokens: '0.4', input_cache_write_tokens: '10', output_tokens: '30' }],
+  ] as const;
+
+  for (const [facts, rates] of cases) {
+    expect(priceRequest(pricing, facts).rates).toEqual(published(rates));
+  }
+  expect(projection([sol])?.entries.some(entry => entry.selector?.serviceTier === 'priority')).toBe(false);
+});
+
+test('Copilot GPT-6 Sol and Luna price the Standard and Fast lanes published by their catalogs', () => {
+  const cases = {
+    'gpt-6-sol': {
+      standardShort: { input_tokens: '2', input_cache_read_tokens: '0.2', input_cache_write_tokens: '2.5', output_tokens: '10' },
+      standardLong: { input_tokens: '4', input_cache_read_tokens: '0.4', input_cache_write_tokens: '5', output_tokens: '15' },
+      priorityShort: { input_tokens: '4', input_cache_read_tokens: '0.4', input_cache_write_tokens: '5', output_tokens: '20' },
+      priorityLong: { input_tokens: '8', input_cache_read_tokens: '0.8', input_cache_write_tokens: '10', output_tokens: '30' },
+    },
+    'gpt-6-luna': {
+      standardShort: { input_tokens: '0.1', input_cache_read_tokens: '0.01', input_cache_write_tokens: '0.125', output_tokens: '0.5' },
+      standardLong: { input_tokens: '0.2', input_cache_read_tokens: '0.02', input_cache_write_tokens: '0.25', output_tokens: '0.75' },
+      priorityShort: { input_tokens: '0.2', input_cache_read_tokens: '0.02', input_cache_write_tokens: '0.25', output_tokens: '1' },
+      priorityLong: { input_tokens: '0.4', input_cache_read_tokens: '0.04', input_cache_write_tokens: '0.5', output_tokens: '1.5' },
+    },
+  } satisfies Record<string, Record<string, PriceVector>>;
+
+  const credits = (rates: PriceVector, contextMax: number) => ({
+    input_price: Number(rates.input_tokens) * 100,
+    cache_price: Number(rates.input_cache_read_tokens) * 100,
+    cache_write_price: Number(rates.input_cache_write_tokens) * 100,
+    output_price: Number(rates.output_tokens) * 100,
+    context_max: contextMax,
+  });
+  for (const [id, rates] of Object.entries(cases)) {
+    const pricing = projection([
+      { id, billing: billing(credits(rates.standardShort, 272000), credits(rates.standardLong, 922000)) },
+      { id: `${id}-fast`, billing: billing(credits(rates.priorityShort, 272000), credits(rates.priorityLong, 922000)) },
+    ], id);
+    expect(priceRequest(pricing, { inputTokens: 272000 }).rates).toEqual(published(rates.standardShort));
+    expect(priceRequest(pricing, { inputTokens: 272001 }).rates).toEqual(published(rates.standardLong));
+    expect(priceRequest(pricing, { serviceTier: 'priority', inputTokens: 272000 }).rates).toEqual(published(rates.priorityShort));
+    expect(priceRequest(pricing, { serviceTier: 'priority', inputTokens: 272001 }).rates).toEqual(published(rates.priorityLong));
+  }
+});

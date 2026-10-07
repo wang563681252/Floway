@@ -7,8 +7,12 @@ export const CODEX_DEFAULT_FLAGS: FlagDefaults = {
   'anthropic-messages-web-search-shim': false,
   'openai-responses-web-search-shim': false,
   'openai-responses-image-generation-shim': false,
-  'openai-responses-compact-shim': false,
+  'openai-responses-compact-shim': true,
+  'openai-responses-compact-decrypt': false,
+  'openai-responses-collaboration-shim': true,
+  'openai-responses-agent-message-shim': false,
   'disable-reasoning-on-forced-tool-choice': false,
+  'empty-tools-tool-choice-none': false,
   'rewrite-mid-conv-system-to-user': false,
   'rewrite-developer-to-system': false,
   // Codex's OpenAI Responses Lite wire carries base instructions as leading developer

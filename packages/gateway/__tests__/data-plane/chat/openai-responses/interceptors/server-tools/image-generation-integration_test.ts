@@ -3,6 +3,7 @@ import { beforeEach, test, vi } from 'vitest';
 import type { OpenAIResponsesInvocation } from '../../../../../../src/data-plane/chat/openai-responses/interceptors/types.ts';
 import { initRepo } from '../../../../../../src/repo/index.ts';
 import { InMemoryRepo } from '../../../../../repo/memory.ts';
+import { saveUpstreamForTest } from '../../../../../repo/upstreams.ts';
 import { mockChatGatewayCtx } from '../../../../../test-utils/gateway-ctx.ts';
 import { createInMemoryImageProcessor, initExternalResourceFetcher, initImageProcessor } from '@floway-dev/platform';
 import { eventFrame } from '@floway-dev/protocols/common';
@@ -196,7 +197,7 @@ beforeEach(async () => {
   // production code path. Seed the in-memory repo with the mocked candidate's
   // upstream id so the fetcher mapper resolves it instead of throwing
   // "unknown upstream id: u".
-  await repo.upstreams.save({
+  await saveUpstreamForTest(repo.upstreams, {
     id: 'u',
     kind: 'custom',
     name: 'mock-image',
@@ -252,6 +253,42 @@ test('generates an image end-to-end and emits the native lifecycle', async () =>
   assertEquals(item.action, 'generate');
 });
 
+test('generates an image from an additional_tools declaration without moving the item', async () => {
+  stub.nextGenerations = [jsonResponse('R0VO')];
+  const invocation = makeCtx([
+    { type: 'additional_tools', role: 'developer', id: 'at_1', tools: [{ type: 'image_generation', quality: 'low' }] },
+    { type: 'message', role: 'user', content: 'draw a cat' },
+  ]);
+  delete invocation.payload.tools;
+
+  const result = await shim(invocation, gatewayCtx(), scriptedRun([
+    callTurn(0, 'call_1', 'a cat'),
+    messageTurn('done'),
+  ]));
+  await drain(result);
+
+  assertEquals(invocation.payload.tools, undefined);
+  const item = invocation.payload.input[0];
+  assert(item.type === 'additional_tools');
+  assertEquals(item.id, 'at_1');
+  assertEquals(item.tools[0].type, 'function');
+  assertEquals(stub.generationsCalls[0], { prompt: 'a cat', n: 1, quality: 'low' });
+});
+
+test('invalid image generation in tool_search_output reports its input path', async () => {
+  const invocation = makeCtx([{
+    type: 'tool_search_output', call_id: 'search_1', tools: [{ type: 'image_generation', size: '512x512' }],
+  }]);
+  delete invocation.payload.tools;
+
+  const result = await shim(invocation, gatewayCtx(), async () => {
+    throw new Error('Invalid request reached upstream');
+  });
+  assert(result.type === 'api-error');
+  const body = JSON.parse(new TextDecoder().decode(result.body)) as { error: { param: string } };
+  assertEquals(body.error.param, 'input[0].tools[0].size');
+});
+
 test('restores a forced hosted choice when the terminal upstream echo omits it', async () => {
   stub.nextGenerations = [jsonResponse('R0VO')];
   const hostedChoice = { type: 'image_generation' } as const;
@@ -268,6 +305,25 @@ test('restores a forced hosted choice when the terminal upstream echo omits it',
   assert(completed?.type === 'response.completed');
   assertEquals(completed.response.tools, [hostedTool]);
   assertEquals(completed.response.tool_choice, hostedChoice);
+});
+
+test('keeps the top-level hosted echo when a later input declaration changes the active config', async () => {
+  stub.nextGenerations = [jsonResponse('R0VO')];
+  const invocation = makeCtx([
+    { type: 'additional_tools', role: 'developer', tools: [{ type: 'image_generation', quality: 'high' }] },
+  ], 'generate', { quality: 'low' });
+  const topLevelTool = invocation.payload.tools![0];
+  const replacement = { type: 'function', name: 'image_generation', parameters: {}, strict: false } as OpenAIResponsesTool;
+  const result = await shim(invocation, gatewayCtx(), scriptedRun([
+    withResponseEcho(callTurn(0, 'call_1', 'a cat'), [replacement]),
+    withResponseEcho(messageTurn('done'), [replacement]),
+  ]));
+  const events = await drain(result);
+
+  assertEquals(stub.generationsCalls[0], { prompt: 'a cat', n: 1, quality: 'high' });
+  const completed = events.find(event => event.type === 'response.completed');
+  assert(completed?.type === 'response.completed');
+  assertEquals(completed.response.tools, [topLevelTool]);
 });
 
 test('relays real partial_image frames when partial_images > 0', async () => {
@@ -599,7 +655,7 @@ test('an image sub-call records its own perf row attributed to the image backend
   assertEquals(imageRows[0].model, 'gpt-image-2');
   // The image shim runs on a local AttemptState distinct from the outer
   // OpenAI Responses turn's — no image-call stamps may leak onto ctx.attempt.
-  assertEquals(ctx.attempt.upstreamCallStartedAt, null);
-  assertEquals(ctx.attempt.firstOutputTokenAt, null);
+  assertEquals(ctx.attempt.timing.upstreamCallStartedAt, null);
+  assertEquals(ctx.attempt.timing.firstOutputTokenAt, null);
   assertEquals(ctx.attempt.telemetry, undefined);
 });

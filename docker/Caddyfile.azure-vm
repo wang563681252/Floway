@@ -7,7 +7,7 @@
 }
 
 {$FLOWAY_DOMAIN} {
-	reverse_proxy web:80 {
+	reverse_proxy server:8788 {
 		# A positive interval preserves cancellation when a client disconnects.
 		# SSE is flushed immediately; WebSocket upgrades are handled automatically.
 		# https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming

@@ -11,10 +11,10 @@ const stubRequest = {};
 const okEvents = (): Promise<ProviderStreamResult<OpenAIResponsesStreamEvent>> =>
   Promise.resolve({ ok: true, events: (async function* () {})(), modelKey: 'test', headers: new Headers() });
 
-const invocation = (payload: CanonicalOpenAIResponsesPayload): OpenAIResponsesBoundaryCtx => ({
+const invocation = (payload: CanonicalOpenAIResponsesPayload, useResponsesLite = false): OpenAIResponsesBoundaryCtx => ({
   payload,
   headers: new Headers(),
-  model: stubProviderModel({ endpoints: { openaiResponses: {} } }),
+  model: stubProviderModel({ endpoints: { openaiResponses: {} }, providerData: { useResponsesLite } }),
   action: 'generate',
 });
 
@@ -48,6 +48,19 @@ test('preserves a caller-supplied instructions string', async () => {
   await injectDefaultInstructions(ctx, stubRequest, okEvents);
 
   assertEquals(ctx.payload.instructions, 'You are a pirate.');
+});
+
+test.each([undefined, null, ''])('preserves Lite instructions value %j and the caller input', async instructions => {
+  const input: CanonicalOpenAIResponsesPayload['input'] = [
+    { type: 'additional_tools', role: 'developer', tools: [] },
+    { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'Caller base instructions' }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] } },
+  ];
+  const ctx = invocation({ model: 'gpt-test', input, instructions }, true);
+
+  await injectDefaultInstructions(ctx, stubRequest, okEvents);
+
+  assertEquals(ctx.payload.instructions, instructions);
+  assertEquals(ctx.payload.input, input);
 });
 
 test.each([

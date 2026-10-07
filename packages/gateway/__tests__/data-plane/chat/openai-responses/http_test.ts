@@ -7,7 +7,9 @@ import type { AuthVars } from '../../../../src/middleware/auth.ts';
 import { initRepo } from '../../../../src/repo/index.ts';
 import type { ApiKey, User } from '../../../../src/repo/types.ts';
 import { InMemoryRepo } from '../../../repo/memory.ts';
+import type { AnthropicMessagesStreamEvent } from '@floway-dev/protocols/anthropic-messages';
 import { type AliasRules, doneFrame, eventFrame, type ModelEndpoints, type ProtocolFrame } from '@floway-dev/protocols/common';
+import type { OpenAIChatCompletionsStreamEvent } from '@floway-dev/protocols/openai-chat-completions';
 import { openaiResponsesResultToEvents, type CanonicalOpenAIResponsesPayload, type OpenAIResponsesResult, type OpenAIResponsesStreamEvent } from '@floway-dev/protocols/openai-responses';
 import { type FlagId, type ModelCandidate, directFetcher, type ProviderOpenAIResponsesResult, type OpenAIResponsesAction, type UpstreamCallOptions } from '@floway-dev/provider';
 import { assert, assertEquals, stubProvider, stubInternalModel, stubProviderModel } from '@floway-dev/test-utils';
@@ -167,6 +169,43 @@ const queueCompletedResponse = (id = 'resp_test') => {
   queueResolution([makeCandidate({ callOpenAIResponses })]);
   return callOpenAIResponses;
 };
+
+test('Responses Lite input items keep their position and metadata across HTTP continuation', async () => {
+  installRepo();
+  const input = [
+    { type: 'additional_tools', role: 'developer', id: 'at_lite', tools: [{ type: 'namespace', name: 'functions', description: '', tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }] }] },
+    { type: 'message', role: 'developer', id: 'msg_base', content: [{ type: 'input_text', text: 'Caller base instructions' }], internal_chat_message_metadata_passthrough: { content_item_kinds: ['model.base_instructions'] } },
+    { type: 'message', role: 'user', content: 'First turn' },
+  ];
+  const bodies: Array<Omit<CanonicalOpenAIResponsesPayload, 'model'>> = [];
+  const candidate = makeCandidate({
+    endpoints: { openaiResponses: {} },
+    callOpenAIResponses: async (_model, body) => {
+      bodies.push(body as Omit<CanonicalOpenAIResponsesPayload, 'model'>);
+      return { action: 'generate', ok: true, events: makeProviderEvents(completedEvents(`resp_lite_${bodies.length}`)), modelKey: 'test-model-key' };
+    },
+  });
+  const send = async (body: Record<string, unknown>): Promise<OpenAIResponsesResult> => {
+    queueResolution([candidate]);
+    const response = await makeApp().request('/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-openai-internal-codex-responses-lite': 'true' },
+      body: JSON.stringify({ model: 'test-model', store: true, ...body }),
+    });
+    assertEquals(response.status, 200);
+    return await response.json() as OpenAIResponsesResult;
+  };
+
+  const first = await send({ input });
+  await send({ previous_response_id: first.id, input: [{ role: 'user', content: 'Second turn' }] });
+
+  assertEquals(bodies[0]?.input, input);
+  assertEquals(bodies[0]?.tools, undefined);
+  assertEquals(bodies[0]?.instructions, undefined);
+  assertEquals(bodies[1]?.input.slice(0, input.length), input);
+  assertEquals(bodies[1]?.tools, undefined);
+  assertEquals(bodies[1]?.instructions, undefined);
+});
 
 test('POST /v1/responses streams a successful SSE body', async () => {
   installRepo();
@@ -715,3 +754,100 @@ test('POST /v1/responses nests a mid-stream failure under `error` so an SDK stre
   ) as { response: { id: string } };
   assertEquals(failed.response.id, created.response.id);
 });
+
+const translatedCustomCandidate = (
+  target: 'openaiChatCompletions' | 'anthropicMessages',
+  observe: (body: Record<string, unknown>) => void,
+  callExec = false,
+): ModelCandidate => {
+  const candidate = makeCandidate({ upstream: `up_${target}`, endpoints: { [target]: {} } });
+  const instance = stubProvider({
+    callOpenAIChatCompletions: async (_model, body) => {
+      observe(body as unknown as Record<string, unknown>);
+      const chunk = (choices: OpenAIChatCompletionsStreamEvent['choices']): OpenAIChatCompletionsStreamEvent => ({ id: 'chat_exec', object: 'chat.completion.chunk', created: 0, model: 'test-model', choices });
+      return {
+        ok: true, modelKey: 'test-model-key', events: (async function* () {
+          yield eventFrame(chunk([{ index: 0, delta: { role: 'assistant' }, finish_reason: null }]));
+          yield eventFrame(chunk([{ index: 0, delta: callExec ? { tool_calls: [{ index: 0, id: 'call_exec', type: 'function', function: { name: 'exec', arguments: '{"input":"patch"}' } }] } : { content: 'done' }, finish_reason: null }]));
+          yield eventFrame(chunk([{ index: 0, delta: {}, finish_reason: callExec ? 'tool_calls' : 'stop' }]));
+          yield doneFrame();
+        })(),
+      };
+    },
+    callAnthropicMessages: async (_model, body) => {
+      observe(body as unknown as Record<string, unknown>);
+      return {
+        ok: true, modelKey: 'test-model-key', events: (async function* () {
+          yield eventFrame<AnthropicMessagesStreamEvent>({ type: 'message_start', message: { id: 'msg_exec', type: 'message', role: 'assistant', model: 'test-model', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } });
+          yield eventFrame<AnthropicMessagesStreamEvent>({ type: 'content_block_start', index: 0, content_block: callExec ? { type: 'tool_use', id: 'call_exec', name: 'exec', input: {} } : { type: 'text', text: '' } });
+          yield eventFrame<AnthropicMessagesStreamEvent>({ type: 'content_block_delta', index: 0, delta: callExec ? { type: 'input_json_delta', partial_json: '{"input":"patch"}' } : { type: 'text_delta', text: 'done' } });
+          yield eventFrame<AnthropicMessagesStreamEvent>({ type: 'content_block_stop', index: 0 });
+          yield eventFrame<AnthropicMessagesStreamEvent>({ type: 'message_delta', delta: { stop_reason: callExec ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } });
+          yield eventFrame<AnthropicMessagesStreamEvent>({ type: 'message_stop' });
+        })(),
+      };
+    },
+  });
+  return { ...candidate, provider: { ...candidate.provider, instance } };
+};
+
+for (const target of ['openaiChatCompletions', 'anthropicMessages'] as const) {
+  test(`POST /v1/responses continues a custom exec call through ${target} with text-array output`, async () => {
+    installRepo();
+    const bodies: Record<string, unknown>[] = [];
+    const observe = (body: Record<string, unknown>) => { bodies.push(structuredClone(body)); };
+    const headers = { 'content-type': 'application/json' };
+    const tools = [{ type: 'custom', name: 'exec' }];
+    queueResolution([translatedCustomCandidate(target, observe, true)]);
+    const first = await makeApp().request('/v1/responses', {
+      method: 'POST', headers,
+      body: JSON.stringify({ model: 'test-model', store: true, tools, input: [{ role: 'user', content: 'inspect the request' }] }),
+    });
+    assertEquals(first.status, 200);
+    const previous = await first.json() as OpenAIResponsesResult;
+    const call = previous.output.find(item => item.type === 'custom_tool_call');
+    assert(call?.type === 'custom_tool_call');
+    assertEquals([call.name, call.namespace, call.input], ['exec', undefined, 'patch']);
+    assertEquals(bodies.length, 1);
+
+    queueResolution([translatedCustomCandidate(target, observe)]);
+    const second = await makeApp().request('/v1/responses', {
+      method: 'POST', headers,
+      body: JSON.stringify({
+        model: 'test-model', store: true, tools, previous_response_id: previous.id,
+        input: [{
+          type: 'custom_tool_call_output', call_id: call.call_id,
+          output: [{ type: 'input_text', text: 'first\n' }, { type: 'input_text', text: 'second' }],
+        }],
+      }),
+    });
+    assertEquals(second.status, 200);
+    const completed = await second.json() as OpenAIResponsesResult;
+    assertEquals(completed.status, 'completed');
+    assertEquals(completed.output_text, 'done');
+    assertEquals(bodies.length, 2);
+    if (target === 'openaiChatCompletions') {
+      assertEquals(bodies[1]!.messages, [
+        { role: 'user', content: 'inspect the request' },
+        {
+          role: 'assistant', content: null,
+          tool_calls: [{ id: call.call_id, type: 'function', function: { name: 'exec', arguments: '{"input":"patch"}' } }],
+        },
+        { role: 'tool', tool_call_id: call.call_id, content: 'first\nsecond' },
+      ]);
+    } else {
+      assertEquals(bodies[1]!.messages, [
+        { role: 'user', content: 'inspect the request' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: call.call_id, name: 'exec', input: { input: 'patch' } }] },
+        {
+          role: 'user',
+          content: [{
+            type: 'tool_result', tool_use_id: call.call_id,
+            content: [{ type: 'text', text: 'first\n' }, { type: 'text', text: 'second' }],
+            cache_control: { type: 'ephemeral' },
+          }],
+        },
+      ]);
+    }
+  });
+}

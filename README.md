@@ -1,26 +1,22 @@
-# Floway
+<h1 align="center">
+  <img src="apps/web/src/assets/floway-blue.svg" alt="Floway logo" width="120" height="120"><br>
+  Floway
+</h1>
 
-Floway is a self-hosted LLM API gateway for coding agents and API clients. It
-puts subscription-backed and token-backed model providers behind one gateway,
-then routes each model through the API shape the client already speaks.
+Floway is a self-hosted LLM API gateway for coding agents and API clients, with
+a web dashboard. It connects GitHub Copilot, ChatGPT, Claude.ai, Azure AI,
+custom HTTP providers, and Ollama through OpenAI, Anthropic, and
+Gemini-compatible APIs.
 
-## Highlights
+## Deployment
 
-- Use GitHub Copilot, ChatGPT subscriptions, Claude.ai subscriptions, Azure AI,
-  configurable multi-protocol HTTP providers, and Ollama from one deployment.
-- Serve OpenAI, Anthropic, Gemini-compatible, audio transcription, and rerank
-  APIs with cross-protocol translation where needed.
-- Discover vendor model catalogs live while retaining manual model configuration
-  for providers that require or permit it.
-- Manage upstreams, routing order, model aliases, API keys, and web search from
-  a dashboard.
-- Generate one-command Claude Code and Codex configurations from an API key.
-- Run on Cloudflare Workers or Node.js, with Docker Compose provided for a
-  self-hosted server and dashboard.
+### Cloudflare Workers
 
-## Quick Start
+Ask your agent or follow the
+[$deploy-to-cloudflare](.agents/skills/deploy-to-cloudflare/SKILL.md) skill yourself
+to configure and deploy Floway to your Cloudflare account.
 
-Docker Compose is the shortest path to a complete local deployment:
+### Docker
 
 ```bash
 git clone https://github.com/Menci/Floway.git
@@ -28,13 +24,24 @@ cd Floway
 ADMIN_KEY='replace-with-a-secret' docker compose -f docker/docker-compose.yml up --build -d
 ```
 
-Open <http://localhost:18088>, leave the username blank, and use `ADMIN_KEY` as
-the password. Then:
+Open <http://localhost:8788>, leave the username blank, and log in with
+`ADMIN_KEY`. Data persists in the `floway-data` volume.
 
-1. Add at least one provider under **Providers → Upstreams**.
-2. Create a key under **Services → API Keys**.
-3. Give that key to a client as a bearer token or `x-api-key`, or use **Agent
-   Setup** to configure Claude Code or Codex.
+### Podman/systemd
+
+Ask your agent or follow the [deployment guide](docker/systemd/README.md) yourself
+to run Floway as a systemd service with Podman.
+
+### Azure VM
+
+For an existing Azure Linux VM reached over SSH, use the
+[Azure VM deployment guide](./docker/azure-vm.md) and its private-port Compose override.
+
+## Usage
+
+Add an upstream under **Providers → Upstreams**, then create a key under
+**Services → API Keys**. Use the API key in your client code or configure your
+agents to use Floway as provider through **Agent Setup**.
 
 On Windows, Codex Agent Setup reuses an existing Node.js executable for fast
 provider-token reads from the protected `floway-token` file. Without Node.js,
@@ -45,18 +52,12 @@ this does not require restarting the Floway gateway.
 The data-plane and control-plane APIs are also exposed directly at
 <http://localhost:8788>. SQLite, file-backed dump bodies, and oversized
 Stateful OpenAI Responses item payloads persist in the `floway-data` volume.
-
-The dashboard uses Floway's control plane to manage users, keys, upstreams,
-routing, and telemetry. Coding agents and API clients call the data plane,
-which performs model resolution, upstream dispatch, and any required protocol
-translation. Both planes are served by the same gateway process.
-
 ### Cursor project agents
 
-The project definitions in [.cursor/agents](.cursor/agents) assign models by
-responsibility. Configure matching aliases on your Floway instance before
-using these agents; the files do not provision aliases or change Cursor's
-global model settings.
+For local Cursor project agents, the following aliases assign models by
+responsibility. These project-local definitions are not installed by Floway.
+Configure matching aliases on your instance before using them; agent files do
+not provision aliases or change Cursor's global model settings.
 The `floway-cursor-` prefix is a naming convention, not an access-control
 boundary: gateway aliases remain visible to callers who can use their targets.
 
@@ -86,8 +87,8 @@ and [Grok 4.7's coding and verification focus](https://x.ai/news/grok-4-7).
 In Cursor, configure the Floway OpenAI-compatible base URL ending in `/v1`,
 add the six exact IDs as custom models, and select
 `floway-cursor-manager-max` for the main conversation. Reload the project after
-adding its agents. The `manager` subagent does not set the main conversation's
-model; [agent-routing.mdc](.cursor/rules/agent-routing.mdc) describes ownership.
+adding its agents. The `manager` subagent does not set the main conversation's model; select that
+model separately in Cursor's main conversation.
 
 [Cursor supports model parameters in agent frontmatter](https://cursor.com/docs/subagents#model-parameters),
 but manually added IDs do not necessarily have the built-in model's options,
@@ -147,9 +148,11 @@ including newly published models, explicit free rates, context bands, and
 accelerated variants. Floway converts GitHub's AI credits to USD at
 [one credit = $0.01](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing);
 these are Copilot's published rates, not notional model-vendor API prices.
-The existing catalog cache stays fresh for ten minutes, then refreshes in the
-background on traffic, and requires a successful fetch after 24 hours. Refresh
-the saved upstream's models in the dashboard to update immediately. No
+Model reads use the stored catalog while execution cells refresh stale or
+missing catalogs in the background. Automatic refreshes become due after ten
+minutes, and failed refreshes retain the last published catalog with visible
+error metadata and retry backoff. Refresh the saved upstream's models in the
+dashboard to update immediately. No
 per-model code edit or deployment is needed for new catalog prices.
 Absent rates remain unpriced rather than becoming zero or borrowing another
 model's price. Recorded usage keeps its original unit-price snapshot;
@@ -197,36 +200,26 @@ pnpm install
 ADMIN_KEY='replace-with-a-secret' pnpm run dev:node
 ```
 
-It serves the data-plane and control-plane APIs but not the dashboard. Use
-Docker Compose for the complete self-hosted UI, or serve the web app separately.
+The Node.js start command builds and serves the dashboard alongside the
+data-plane and control-plane APIs. Prebuilt production deployments can use
+`pnpm --filter @floway-dev/platform-node run start:built` after building the web
+assets.
 Production Node.js deployments must set both `NODE_ENV=production` and a
 non-empty `ADMIN_KEY`.
 
-Podman users can instead follow the
-[systemd deployment guide](./docker/systemd/README.md).
-
-For an existing Azure Linux VM reached over SSH, use the
-[Azure VM deployment guide](./docker/azure-vm.md) and its private-port Compose override.
+Context compaction defaults to the gateway summarization shim for every
+provider. Upstream and manual-model flag overrides remain authoritative;
+operators can disable `openai-responses-compact-shim` on a Responses target to
+use native compaction instead. This does not increase the model's context
+window.
 
 ## Development
 
 ```bash
 pnpm install
-pnpm run dev
+pnpm run dev:node
 pnpm run verify
 ```
-
-`verify` chains every check `.github/workflows/verify.yaml` runs, so a green run
-locally is a green run on a pull request. Each link is also a script of its own,
-in the order the chain runs them: `typegen`, `lint`, `typecheck`, `test`,
-`test:installers`, `check:agents-md`, `check:generated-assets`,
-`check:verify-parity`, and `build:web`, which carries the assertions about the
-emitted bundle. `typegen` comes first because the generated route types are not
-checked in and the lint configuration is type-aware, so a fresh clone has to
-produce them before anything else can read the dashboard's sources.
-
-[AGENTS.md](./AGENTS.md) defines the repository-wide agent requirements and
-indexes its CI workflows, skills, workspace packages, and their responsibilities.
 
 ## License
 
