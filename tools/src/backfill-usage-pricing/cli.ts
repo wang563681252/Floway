@@ -7,6 +7,7 @@ import { openD1Database } from './d1-database.ts';
 import type { DatabaseIdentity, ToolDatabase } from './database.ts';
 import { inputError, ToolError } from './errors.ts';
 import { applyPlan, buildPlan, inspectDatabase, normalizeIntent, parsePlan, type BackfillIntent } from './plan.ts';
+import { loadPricingSourceFile } from './pricing-source.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const DEFAULT_WRANGLER_CONFIG = resolve(ROOT, 'wrangler.jsonc');
@@ -27,6 +28,7 @@ Selection options:
   --upstream <id> --model <public id> --model-key <wire id>
   --start-hour <YYYY-MM-DDTHH> --end-hour <YYYY-MM-DDTHH> --timezone <IANA name>
   --mode <fill|overwrite> --metric <billing metric> [--metric <billing metric> ...]
+  --pricing-file <verified scoped pricing JSON> (optional; never updates runtime model prices)
 `;
 
 const requiredString = (value: string | undefined, name: string): string => {
@@ -51,6 +53,7 @@ const parseDatabaseArgs = (args: readonly string[]): {
     mode?: string;
     metrics?: string[];
     output?: string;
+    pricingFile?: string;
   };
 } => {
   const parsed = parseArgs({
@@ -74,6 +77,7 @@ const parseDatabaseArgs = (args: readonly string[]): {
       mode: { type: 'string' },
       metric: { type: 'string', multiple: true },
       output: { type: 'string' },
+      'pricing-file': { type: 'string' },
     },
   });
   if (parsed.positionals.length > 0) throw inputError('unexpected-arguments', `Unexpected arguments: ${parsed.positionals.join(' ')}`);
@@ -87,6 +91,7 @@ const parseDatabaseArgs = (args: readonly string[]): {
     ...(parsed.values.mode !== undefined ? { mode: parsed.values.mode } : {}),
     ...(parsed.values.metric !== undefined ? { metrics: parsed.values.metric } : {}),
     ...(parsed.values.output !== undefined ? { output: parsed.values.output } : {}),
+    ...(parsed.values['pricing-file'] !== undefined ? { pricingFile: parsed.values['pricing-file'] } : {}),
   };
   const database = requiredString(parsed.values.database, 'database');
   if (database !== 'node' && database !== 'd1') throw inputError('invalid-database', '--database must be node or d1');
@@ -190,8 +195,11 @@ const writePlan = async (path: string, plan: unknown): Promise<void> => {
 const plan = async (args: readonly string[]): Promise<unknown> => {
   const databaseOptions = parseDatabaseArgs(args);
   const { intent, output } = parseIntent(databaseOptions.selection);
+  const pricingSource = databaseOptions.selection.pricingFile === undefined
+    ? undefined
+    : await loadPricingSourceFile(invocationPath(databaseOptions.selection.pricingFile), intent);
   const database = await openDatabase(databaseOptions, 'read');
-  const built = await withDatabase(database, () => buildPlan(database, intent));
+  const built = await withDatabase(database, () => buildPlan(database, intent, { pricingSource }));
   await writePlan(output, built.plan);
   return { schemaVersion: 1, kind: 'usage-pricing-plan-created', output, plan: built.plan };
 };

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type { DatabaseIdentity, DatabaseValue, SqlStatement, ToolDatabase } from './database.ts';
 import { inputError, safetyError, ToolError, verificationError } from './errors.ts';
+import { assertPricingSourceScope, loadPricingSourceFile, parsePricingSourceReference, type PricingSourceFile, type PricingSourceReference } from './pricing-source.ts';
 import { ratesForStoredSelector, resolveUsagePricing, type PricingResolution, type StoredUpstream } from './pricing.ts';
 import {
   BILLING_METRICS,
@@ -66,6 +67,7 @@ export interface BackfillPlan {
     source?: string;
     digest?: string;
     reason?: string;
+    sourceFile?: PricingSourceReference;
   };
   evidence: {
     pricedSiblingExists: boolean;
@@ -235,10 +237,15 @@ const loadPricedSiblingExists = async (database: ToolDatabase, intent: BackfillI
   return result.rows[0].present === 1;
 };
 
-const pricingArtifact = (resolution: PricingResolution): BackfillPlan['pricing'] => {
+const pricingArtifact = (resolution: PricingResolution, pricingSource?: PricingSourceFile): BackfillPlan['pricing'] => {
   if (resolution.status === 'unavailable') return { status: 'unavailable', reason: resolution.reason };
   if (resolution.status === 'unpriced') return { status: 'unpriced', source: resolution.source };
-  return { status: 'priced', source: resolution.source, digest: `sha256:${sha256(resolution.pricing)}` };
+  return {
+    status: 'priced',
+    source: resolution.source,
+    digest: `sha256:${sha256(resolution.pricing)}`,
+    ...(pricingSource ? { sourceFile: { path: pricingSource.path, digest: pricingSource.digest } } : {}),
+  };
 };
 
 const createPlan = (
@@ -249,6 +256,7 @@ const createPlan = (
   pricedSiblingExists: boolean,
   resolution: PricingResolution,
   createdAt: string,
+  pricingSource?: PricingSourceFile,
 ): BackfillPlan => {
   const operations: BackfillOperation[] = [];
   const skipped: SkippedRate[] = [];
@@ -313,7 +321,7 @@ const createPlan = (
     createdAt,
     database,
     intent,
-    pricing: pricingArtifact(resolution),
+    pricing: pricingArtifact(resolution, pricingSource),
     evidence: { pricedSiblingExists },
     snapshot: states,
     operations,
@@ -331,7 +339,7 @@ const createPlan = (
 export const buildPlan = async (
   database: ToolDatabase,
   rawIntent: BackfillIntent,
-  options: { now?: number; createdAt?: string } = {},
+  options: { now?: number; createdAt?: string; pricingSource?: PricingSourceFile } = {},
 ): Promise<BuiltPlan> => {
   await validateUsageSchema(database);
   const intent = normalizeIntent(rawIntent);
@@ -346,7 +354,15 @@ export const buildPlan = async (
     loadStates(database, intent),
     loadPricedSiblingExists(database, intent),
   ]);
-  const resolution = resolveUsagePricing(upstream, { model: intent.model, modelKey: intent.modelKey }, options.now);
+  if (options.pricingSource) assertPricingSourceScope(options.pricingSource.document, intent);
+  const resolution: PricingResolution = options.pricingSource
+    ? {
+        status: 'priced',
+        pricing: options.pricingSource.document.pricing,
+        source: `reference:${options.pricingSource.document.referenceUrl}`,
+        guardsModelsCache: false,
+      }
+    : resolveUsagePricing(upstream, { model: intent.model, modelKey: intent.modelKey }, options.now);
   const plan = createPlan(
     database.identity,
     intent,
@@ -355,6 +371,7 @@ export const buildPlan = async (
     pricedSiblingExists,
     resolution,
     options.createdAt ?? new Date(options.now ?? Date.now()).toISOString(),
+    options.pricingSource,
   );
   return {
     plan,
@@ -451,7 +468,7 @@ const applyStatement = (plan: BackfillPlan, guards: PlanGuards): SqlStatement =>
       plan.intent.upstream,
       guards.upstreamConfigJson,
       guards.guardModelsCache ? 1 : 0,
-      guards.upstreamModelsCacheJson,
+      guards.guardModelsCache ? guards.upstreamModelsCacheJson : null,
       guards.pricedSiblingExists ? 1 : 0,
     ],
   };
@@ -467,6 +484,7 @@ const ensurePlan = (value: unknown): BackfillPlan => {
     throw inputError('invalid-plan', 'Plan createdAt must be a canonical ISO timestamp');
   }
   normalizeIntent(plan.intent);
+  if (plan.pricing.sourceFile !== undefined) parsePricingSourceReference(plan.pricing.sourceFile);
   if (plan.planId !== planIdFor(plan)) throw safetyError('plan-tampered', 'Plan ID does not match its contents');
   return plan;
 };
@@ -535,7 +553,15 @@ export const applyPlan = async (database: ToolDatabase, savedPlan: BackfillPlan)
   if (canonicalJson(database.identity) !== canonicalJson(savedPlan.database)) {
     throw safetyError('database-mismatch', 'The opened database does not match the plan target');
   }
-  const rebuilt = await buildPlan(database, savedPlan.intent, { createdAt: savedPlan.createdAt });
+  const sourceReference = savedPlan.pricing.sourceFile;
+  const pricingSource = sourceReference ? await loadPricingSourceFile(sourceReference.path, savedPlan.intent) : undefined;
+  if (pricingSource && pricingSource.digest !== sourceReference?.digest) {
+    throw safetyError('pricing-source-changed', 'Pricing source changed after the plan was created');
+  }
+  const rebuilt = await buildPlan(database, savedPlan.intent, {
+    createdAt: savedPlan.createdAt,
+    ...(pricingSource ? { pricingSource } : {}),
+  });
   if (rebuilt.plan.planId !== savedPlan.planId) throw safetyError('stale-plan', 'Database rows or pricing changed after the plan was created');
   if (savedPlan.blockers.length > 0) throw safetyError('blocked-plan', 'Plan contains safety blockers');
   if (savedPlan.operations.length === 0) {

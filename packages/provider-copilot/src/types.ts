@@ -12,6 +12,8 @@ export interface CopilotRawModel {
   created?: number;
   display_name?: string;
   supported_endpoints?: string[];
+  // Validated by the pricing projection rather than trusted at the JSON boundary.
+  billing?: unknown;
   capabilities?: {
     type?: string;
     limits?: {

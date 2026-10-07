@@ -1,0 +1,36 @@
+services:
+  web:
+    ports: !override
+      - "127.0.0.1:${FLOWAY_WEB_PORT:-18088}:80"
+
+  caddy:
+    # Official Caddy 2.11.4 multi-platform image: https://hub.docker.com/_/caddy
+    image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
+    environment:
+      FLOWAY_DOMAIN: ${FLOWAY_DOMAIN:?set FLOWAY_DOMAIN to the public DNS name}
+    depends_on:
+      web:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.azure-vm:/etc/caddy/Caddyfile:ro
+      - floway-caddy-data:/data
+      - floway-caddy-config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+volumes:
+  floway-caddy-data:
+  floway-caddy-config:

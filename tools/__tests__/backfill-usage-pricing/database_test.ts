@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'vitest';
 
 import { openD1Database, renderD1Statement } from '../../src/backfill-usage-pricing/d1-database.ts';
+import { ToolError } from '../../src/backfill-usage-pricing/errors.ts';
 import { openNodeDatabase } from '../../src/backfill-usage-pricing/node-database.ts';
 import { assertEquals, assertRejects, assertStringIncludes } from '@floway-dev/test-utils';
 
@@ -46,13 +47,16 @@ test('D1 connector resolves its binding and returns Wrangler JSON rows', async (
     d1_databases: [{ binding: 'DB', database_id: 'database-id', database_name: 'floway-test' }],
   }));
   let invoked: readonly string[] = [];
+  let invokedCommand = '';
   let invokedDatabaseId = '';
+  let malformedOutput = false;
   const database = await openD1Database({
     binding: 'DB',
     configPath,
     location: 'local',
     persistTo,
-    runner: async (_command, args) => {
+    runner: async (command, args) => {
+      invokedCommand = command;
       invoked = args;
       const snapshotPath = args[args.indexOf('--config') + 1]!;
       const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8'));
@@ -60,7 +64,7 @@ test('D1 connector resolves its binding and returns Wrangler JSON rows', async (
       return {
         exitCode: 0,
         stderr: '',
-        stdout: JSON.stringify([{ success: true, results: [{ value: 'ok' }], meta: { changes: 0 } }]),
+        stdout: `Wrangler startup notice\n${malformedOutput ? '[{' : JSON.stringify([{ success: true, results: [{ value: 'ok' }], meta: { changes: 0 } }])}`,
       };
     },
   });
@@ -68,11 +72,38 @@ test('D1 connector resolves its binding and returns Wrangler JSON rows', async (
     d1_databases: [{ binding: 'DB', database_id: 'different-id', database_name: 'different' }],
   }));
   assertEquals((await database.query<{ value: string }>({ sql: 'SELECT ? AS value', params: ['ok'] })).rows, [{ value: 'ok' }]);
+  assertEquals(invokedCommand, process.execPath);
+  assertStringIncludes(invoked[0]!, join('wrangler', 'bin', 'wrangler.js'));
+  assertEquals(invoked.slice(1, 4), ['d1', 'execute', 'DB']);
   assertEquals(invokedDatabaseId, 'database-id');
   assertEquals(invoked.includes('--local'), true);
   assertEquals(invoked.includes('--persist-to'), true);
   assertEquals(invoked[invoked.indexOf('--config') + 1] === configPath, false);
+  malformedOutput = true;
+  await assertRejects(() => database.query({ sql: 'SELECT 1' }), ToolError, 'Wrangler returned malformed JSON');
   await database.close();
+});
+
+test('D1 connector launches Wrangler directly with intact SQL arguments', { timeout: 60_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'floway tools d1 & '));
+  const configPath = join(directory, 'wrangler.jsonc');
+  const persistTo = join(directory, 'state');
+  await mkdir(persistTo);
+  await writeFile(configPath, JSON.stringify({
+    d1_databases: [{ binding: 'DB', database_id: '00000000-0000-0000-0000-000000000001', database_name: 'floway-test' }],
+  }));
+  const database = await openD1Database({ binding: 'DB', configPath, location: 'local', persistTo });
+  try {
+    const value = 'Floway\'s & | < > ^ %PATH% $value "quoted"\nsecond line';
+    const result = await database.query<{ value: string; literal: string }>({
+      sql: 'SELECT ? AS value, \'100% & | < > ^ "quoted"\' AS literal',
+      params: [value],
+    });
+    assertEquals(result.rows, [{ value, literal: '100% & | < > ^ "quoted"' }]);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('D1 connector serializes concurrent statements for local persistence', async () => {

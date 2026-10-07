@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,12 +10,12 @@ import { test } from 'vitest';
 import { assertEquals } from '@floway-dev/test-utils';
 
 const CLI = fileURLToPath(new URL('../../src/backfill-usage-pricing/cli.ts', import.meta.url));
-const TSX_LOADER = fileURLToPath(import.meta.resolve('tsx'));
+const TSX_LOADER = import.meta.resolve('tsx');
 
 // Three `tsx` subprocesses, each paying its own loader startup. The default 5 s is marginal
 // for that on a loaded machine — the test passes alone and inside a quiet suite and times out
 // under a full `verify`, which is a stopwatch failing rather than the CLI.
-test('non-interactive CLI writes a private plan and applies only that artifact', { timeout: 60_000 }, async () => {
+test.each([false, true])('non-interactive CLI writes a private plan and applies only that artifact (explicit source: %s)', { timeout: 60_000 }, async explicitSource => {
   const directory = await mkdtemp(join(tmpdir(), 'floway-tools-cli-'));
   const databasePath = join(directory, 'floway.db');
   const planPath = join(directory, 'plan.json');
@@ -47,6 +47,18 @@ test('non-interactive CLI writes a private plan and applies only that artifact',
   db.prepare('INSERT INTO usage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .run('key-1', 'public', 'azure-1', 'wire', '2026-01-01T00', '{}', 'input_tokens', '10', null);
   db.close();
+  if (explicitSource) {
+    await writeFile(join(directory, 'pricing.json'), JSON.stringify({
+      schemaVersion: 1,
+      kind: 'usage-pricing-source',
+      upstream: 'azure-1',
+      model: 'public',
+      modelKey: 'wire',
+      referenceUrl: 'https://vendor.example/pricing',
+      observedAt: '2026-10-04T00:00:00.000Z',
+      pricing: { entries: [{ rates: { input_tokens: '0.02' } }] },
+    }));
+  }
 
   const planned = spawnSync(process.execPath, [
     '--import', TSX_LOADER, CLI, 'plan',
@@ -55,6 +67,7 @@ test('non-interactive CLI writes a private plan and applies only that artifact',
     '--start-hour', '2026-01-01T00', '--end-hour', '2026-01-02T00',
     '--timezone', 'UTC', '--mode', 'fill', '--metric', 'input_tokens',
     '--output', 'plan.json',
+    ...(explicitSource ? ['--pricing-file', 'pricing.json'] : []),
   ], { encoding: 'utf8', env: { ...process.env, INIT_CWD: directory } });
   assertEquals(planned.status, 0, planned.stderr);
   assertEquals(JSON.parse(planned.stdout).kind, 'usage-pricing-plan-created');
@@ -69,4 +82,5 @@ test('non-interactive CLI writes a private plan and applies only that artifact',
   const appliedResult = JSON.parse(applied.stdout);
   assertEquals(appliedResult.rowsUpdated, 1);
   assertEquals(appliedResult.summary, { remainingNullRows: 0, remainingNullRowsByMetric: {} });
+  assertEquals(appliedResult.operations[0]?.proposedUnitPrice, explicitSource ? '0.02' : '0.01');
 });

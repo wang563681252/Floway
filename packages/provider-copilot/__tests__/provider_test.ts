@@ -9,7 +9,7 @@ import { readCopilotUpstreamState, type CopilotUpstreamState } from '../src/stat
 import type { CopilotRawModel } from '../src/types.ts';
 import { createInMemoryImageProcessor, initImageProcessor } from '@floway-dev/platform';
 import type { AnthropicMessagesPayload } from '@floway-dev/protocols/anthropic-messages';
-import { appendOpaqueTrailer, decodeOpaqueValue } from '@floway-dev/protocols/common';
+import { appendOpaqueTrailer, decodeOpaqueValue, priceRequest } from '@floway-dev/protocols/common';
 import type { UpstreamRecord } from '@floway-dev/provider';
 import { directFetcher, initProviderRepo } from '@floway-dev/provider';
 import { assertEquals, assertRejects, assertThrows, jsonResponse, noopAnthropicMessagesUpstreamCallOptions, noopUpstreamCallOptions, sseResponse, withMockedFetch } from '@floway-dev/test-utils';
@@ -115,6 +115,7 @@ interface CopilotModelFixture {
   maxContextWindowTokens?: number;
   maxPromptTokens?: number;
   maxOutputTokens?: number;
+  billing?: unknown;
 }
 
 const copilotModels = (models: CopilotModelFixture[]) => ({
@@ -125,6 +126,7 @@ const copilotModels = (models: CopilotModelFixture[]) => ({
     ...(model.display_name !== undefined ? { display_name: model.display_name } : {}),
     version: '1',
     supported_endpoints: model.supported_endpoints ?? [],
+    ...(model.billing === undefined ? {} : { billing: model.billing }),
     capabilities: {
       type: 'chat',
       limits: {
@@ -751,6 +753,66 @@ const copilotPreflight = (request: Request): Response | null => {
   }
   return null;
 };
+
+test('Copilot provider projects live prices for new models, fast variants and free entries on every catalog refresh', async () => {
+  const harness = await setupCopilotTest();
+  const instance = createCopilotProvider(harness.copilotUpstream).instance;
+  let inputPrice = 200;
+  let catalogFetches = 0;
+  const billing = (input: number, output: number, batch = 1_000_000) => ({
+    token_prices: { batch_size: batch, default: { input_price: input, output_price: output } },
+  });
+  await withMockedFetch(
+    request => {
+      const preflight = copilotPreflight(request);
+      if (preflight) return preflight;
+      if (new URL(request.url).pathname === '/models') {
+        catalogFetches++;
+        return jsonResponse(copilotModels([
+          { id: 'new-live-model', supported_endpoints: ['/responses'], billing: billing(inputPrice, 1000) },
+          { id: 'new-live-model-fast', supported_endpoints: ['/responses'], billing: billing(inputPrice * 2, 2000) },
+          { id: 'new-free-model', supported_endpoints: ['/responses'], billing: billing(0, 0, 0) },
+        ]));
+      }
+      throw new Error(`Unhandled fetch ${request.url}`);
+    },
+    async () => {
+      const first = await instance.getProvidedModels(directFetcher);
+      assertEquals(first.map(model => model.id), ['new-live-model', 'new-free-model']);
+      assertEquals(priceRequest(first[0].pricing ?? null, {}).rates?.input_tokens, '0.000002');
+      assertEquals(priceRequest(first[0].pricing ?? null, { serviceTier: 'priority' }).rates?.input_tokens, '0.000004');
+      assertEquals(priceRequest(first[1].pricing ?? null, {}).rates, { input_tokens: '0', output_tokens: '0' });
+      inputPrice = 300;
+      const refreshed = await instance.getProvidedModels(directFetcher);
+      assertEquals(priceRequest(refreshed[0].pricing ?? null, {}).rates?.input_tokens, '0.000003');
+      assertEquals(priceRequest(refreshed[0].pricing ?? null, { serviceTier: 'priority' }).rates?.input_tokens, '0.000006');
+    },
+  );
+  assertEquals(catalogFetches, 2);
+});
+
+test('Copilot provider rejects invalid prices before persisting the fetched known-model catalog', async () => {
+  const harness = await setupCopilotTest();
+  const instance = createCopilotProvider(harness.copilotUpstream).instance;
+  await withMockedFetch(
+    request => {
+      const preflight = copilotPreflight(request);
+      if (preflight) return preflight;
+      if (new URL(request.url).pathname === '/models') {
+        return jsonResponse(copilotModels([{
+          id: 'invalid-price',
+          supported_endpoints: ['/responses'],
+          billing: { token_prices: { batch_size: 0, default: { input_price: 1 } } },
+        }]));
+      }
+      throw new Error(`Unhandled fetch ${request.url}`);
+    },
+    async () => {
+      await assertRejects(() => instance.getProvidedModels(directFetcher), RangeError, 'non-zero price with a zero batch_size');
+    },
+  );
+  assertEquals(readCopilotUpstreamState(harness.getCurrentState()).knownModels, null);
+});
 
 test('Copilot provider rejects a merged public model without a raw variant group', async () => {
   const harness = await setupCopilotTest();

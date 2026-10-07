@@ -8,6 +8,7 @@ import type { ModelsCacheGeneration } from '../../../src/repo/types.ts';
 import { serializeStoredConfig } from '../../../src/repo/upstream-json.ts';
 import { InMemoryRepo } from '../../repo/memory.ts';
 import { createSqliteTestDb } from '../../repo/test-sqlite.ts';
+import { basePricing, priceRequest } from '@floway-dev/protocols/common';
 import { directFetcher, type ProviderModel, type UpstreamModelsCache } from '@floway-dev/provider';
 import { stubProvider, stubProviderModel } from '@floway-dev/test-utils';
 
@@ -303,6 +304,48 @@ describe('fetchUpstreamModelsCached', () => {
     expect(result.map(model => model.id)).toEqual(['current-catalog']);
     expect(fetchFn).toHaveBeenCalledTimes(1);
     expect((await storedCache(repo))?.revision).toBe(MODEL_CATALOG_REVISION);
+  });
+
+  test('an obsolete Copilot rate card is replaced even when its cached model id is unchanged', async () => {
+    const repo = await setupRepo();
+    const previous = { ...aModel('gpt-6.1-sol'), pricing: basePricing({ input_tokens: '0.000004' }) };
+    const current = { ...aModel('gpt-6.1-sol'), pricing: basePricing({ input_tokens: '0.000002' }) };
+    const cache = await seedCache(repo, {
+      revision: MODEL_CATALOG_REVISION - 1,
+      fetchedAt: Date.now(),
+      models: [previous],
+    });
+    const fetchFn = vi.fn(async () => [current]);
+    const result = await fetchUpstreamModelsCached(
+      { ...stubInstance(fetchFn, cache), kind: 'copilot' },
+      { scheduler: () => {}, fetcher: directFetcher },
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(priceRequest(result[0].pricing ?? null, {}).rates?.input_tokens).toBe('0.000002');
+    expect((await storedCache(repo))?.models[0].pricing).toEqual(current.pricing);
+  });
+
+  test('upstream price changes refresh within the existing stale-while-revalidate window', async () => {
+    const repo = await setupRepo();
+    const previous = { ...aModel('future-model'), pricing: basePricing({ input_tokens: '0.000002' }) };
+    const current = { ...aModel('future-model'), pricing: basePricing({ input_tokens: '0' }) };
+    const cache = await seedCache(repo, {
+      revision: MODEL_CATALOG_REVISION,
+      fetchedAt: Date.now() - 11 * 60_000,
+      models: [previous],
+    });
+    const fetchFn = vi.fn(async () => [current]);
+    const scheduled: Promise<unknown>[] = [];
+    const instance = { ...stubInstance(fetchFn, cache), kind: 'copilot' as const };
+    const first = await fetchUpstreamModelsCached(instance, {
+      scheduler: promise => { scheduled.push(promise); },
+      fetcher: directFetcher,
+    });
+    expect(first[0].pricing).toEqual(previous.pricing);
+    await Promise.all(scheduled);
+    const second = await fetchUpstreamModelsCached(instance, { scheduler: () => {}, fetcher: directFetcher });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(priceRequest(second[0].pricing ?? null, {}).rates?.input_tokens).toBe('0');
   });
 
   test('an old-shape stale SQL cache hydrates cold and is replaced by a current fetch', async () => {

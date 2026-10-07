@@ -378,6 +378,7 @@ export function copilotModels(
     maxContextWindowTokens?: number;
     maxPromptTokens?: number;
     maxOutputTokens?: number;
+    billing?: unknown;
   }>,
 ) {
   return {
@@ -388,6 +389,7 @@ export function copilotModels(
       ...(model.display_name !== undefined ? { display_name: model.display_name } : {}),
       version: '1',
       supported_endpoints: model.supported_endpoints ?? [],
+      ...(model.billing === undefined ? {} : { billing: model.billing }),
       capabilities: {
         type: 'chat',
         limits: {

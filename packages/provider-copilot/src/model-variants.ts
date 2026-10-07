@@ -29,6 +29,7 @@
 
 import { copilotPublicModelId, stripClaudeDateSuffix } from './model-name.ts';
 import type { CopilotRawModel } from './types.ts';
+import { isRecord } from '@floway-dev/provider';
 
 const VARIANT_SUFFIXES = ['1m-internal', 'xhigh', 'high', '1m', 'fast'] as const;
 
@@ -91,3 +92,7 @@ export const copilotVariantIndex = (rawModels: readonly CopilotRawModel[]): Copi
     suffixOf: rawId => splitVariantSuffix(stripClaudeDateSuffix(rawId), catalogIds)?.suffix,
   };
 };
+
+export const copilotModelHasRawModelKey = (providerData: unknown, modelKey: string): boolean =>
+  isRecord(providerData) && Array.isArray(providerData.rawModels)
+  && providerData.rawModels.some(raw => isRecord(raw) && raw.id === modelKey);

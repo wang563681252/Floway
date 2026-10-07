@@ -36,6 +36,12 @@ the password. Then:
 3. Give that key to a client as a bearer token or `x-api-key`, or use **Agent
    Setup** to configure Claude Code or Codex.
 
+On Windows, Codex Agent Setup reuses an existing Node.js executable for fast
+provider-token reads from the protected `floway-token` file. Without Node.js,
+it retains a non-interactive PowerShell helper and reports the slower fallback.
+Restart existing Codex clients after changing their provider-auth configuration;
+this does not require restarting the Floway gateway.
+
 The data-plane and control-plane APIs are also exposed directly at
 <http://localhost:8788>. SQLite, file-backed dump bodies, and oversized
 Stateful OpenAI Responses item payloads persist in the `floway-data` volume.
@@ -44,6 +50,54 @@ The dashboard uses Floway's control plane to manage users, keys, upstreams,
 routing, and telemetry. Coding agents and API clients call the data plane,
 which performs model resolution, upstream dispatch, and any required protocol
 translation. Both planes are served by the same gateway process.
+
+### Cursor project agents
+
+The project definitions in [.cursor/agents](.cursor/agents) assign models by
+responsibility. Configure matching aliases on your Floway instance before
+using these agents; the files do not provision aliases or change Cursor's
+global model settings.
+The `floway-cursor-` prefix is a naming convention, not an access-control
+boundary: gateway aliases remain visible to callers who can use their targets.
+
+| Role | Floway model ID | Real model | Fixed reasoning effort |
+| --- | --- | --- | --- |
+| Manager | `floway-cursor-manager-max` | `gpt-6-astra` | `max` |
+| Researcher | `floway-cursor-researcher-max` | `gpt-5.6-terra` | `max` |
+| Developer | `floway-cursor-developer-max` | `gpt-5.6-sol` | `max` |
+| Debugger | `floway-cursor-debugger-max` | `gpt-6-astra` | `max` |
+| Reviewer | `floway-cursor-reviewer-xhigh` | `grok-4.7` | `xhigh` |
+| Verifier | `floway-cursor-verifier-max` | `gpt-5.6-terra` | `max` |
+
+Use a single real-model target per alias, with chat rules
+`{"reasoning":{"effort":"max"}}` (or `xhigh` for the reviewer), and make the
+alias visible in the model list. The developer alias also retains
+`"serviceTier":"priority"` from the existing Sol configuration. Check the
+upstream catalog before applying these levels to another provider or version;
+`max` is not universal.
+
+Astra handles coordination and difficult diagnosis; Sol handles implementation;
+Terra provides a balanced choice for investigation and test-result analysis;
+Grok provides an independent review perspective. These are routing choices,
+not a claim that one model is best for every task. Model selection is grounded
+in the live upstream catalog, [Cursor's model descriptions](https://cursor.com/docs/models-and-pricing),
+and [Grok 4.7's coding and verification focus](https://x.ai/news/grok-4-7).
+
+In Cursor, configure the Floway OpenAI-compatible base URL ending in `/v1`,
+add the six exact IDs as custom models, and select
+`floway-cursor-manager-max` for the main conversation. Reload the project after
+adding its agents. The `manager` subagent does not set the main conversation's
+model; [agent-routing.mdc](.cursor/rules/agent-routing.mdc) describes ownership.
+
+[Cursor supports model parameters in agent frontmatter](https://cursor.com/docs/subagents#model-parameters),
+but manually added IDs do not necessarily have the built-in model's options,
+and a [custom-base-URL reasoning-effort forwarding issue](https://forum.cursor.com/t/165529/13)
+has been reported. Floway alias rules override the outgoing effort after
+translation, including when the client omits it or requests a lower value.
+Pinned aliases deliberately omit a selectable effort from their catalog
+metadata: a missing level dropdown does not mean reasoning is disabled.
+Highest reasoning effort may increase latency and usage; it does not change
+the context-window limit and is not Cursor's separate Max Mode setting.
 
 ## Compatibility
 
@@ -87,6 +141,19 @@ responses retain their upstream wire shape.
 | Custom | Configurable multi-protocol HTTP endpoint, credential, and per-header ingress passthrough/overwrite rules | Live `/models` (OpenAI, Anthropic, or superset shapes), manual models, or both |
 | Azure | Azure AI resource or Foundry project endpoint and API key | Configured models |
 | Ollama | ollama.com or a self-hosted Ollama-compatible server | Fetched live from Ollama, with optional manual overrides |
+
+Copilot model prices come automatically from its authenticated model catalog,
+including newly published models, explicit free rates, context bands, and
+accelerated variants. Floway converts GitHub's AI credits to USD at
+[one credit = $0.01](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing);
+these are Copilot's published rates, not notional model-vendor API prices.
+The existing catalog cache stays fresh for ten minutes, then refreshes in the
+background on traffic, and requires a successful fetch after 24 hours. Refresh
+the saved upstream's models in the dashboard to update immediately. No
+per-model code edit or deployment is needed for new catalog prices.
+Absent rates remain unpriced rather than becoming zero or borrowing another
+model's price. Recorded usage keeps its original unit-price snapshot;
+historical backfills are explicit and require a current cached Copilot catalog.
 
 ## Other Deployment Options
 
@@ -137,6 +204,9 @@ non-empty `ADMIN_KEY`.
 
 Podman users can instead follow the
 [systemd deployment guide](./docker/systemd/README.md).
+
+For an existing Azure Linux VM reached over SSH, use the
+[Azure VM deployment guide](./docker/azure-vm.md) and its private-port Compose override.
 
 ## Development
 

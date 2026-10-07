@@ -28,7 +28,12 @@ type ProcessRunner = (command: string, args: readonly string[], cwd: string) => 
 }>;
 
 const defaultRunner: ProcessRunner = (command, args, cwd) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(command, args, {
+    cwd,
+    // https://developers.cloudflare.com/workers/wrangler/system-environment-variables/#wrangler_log
+    env: { ...process.env, WRANGLER_LOG: 'log' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
@@ -132,7 +137,8 @@ const findWranglerResult = (value: unknown): WranglerResult => {
 const parseWranglerResult = <Row>(stdout: string): StatementResult<Row> => {
   let decoded: unknown;
   try {
-    decoded = JSON.parse(stdout);
+    const jsonStart = stdout.search(/^\s*(?:\{|\[)/m);
+    decoded = JSON.parse(jsonStart < 0 ? stdout : stdout.slice(jsonStart));
   } catch (cause) {
     throw new ToolError('wrangler-json', 'Wrangler returned malformed JSON', 1, { cause });
   }
@@ -215,19 +221,19 @@ export const openD1Database = async (options: {
   const snapshotDirectory = await mkdtemp(join(snapshotsRoot, 'wrangler-d1-'));
   const snapshotConfigPath = join(snapshotDirectory, 'wrangler.json');
   await writeFile(snapshotConfigPath, JSON.stringify(resolved.snapshot), { encoding: 'utf8', mode: 0o600 });
-  const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+  const wrangler = join(workspaceRoot, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
   let previousExecution: Promise<void> = Promise.resolve();
 
   const runStatement = async <Row>(statement: SqlStatement): Promise<StatementResult<Row>> => {
     const args = [
-      'exec', 'wrangler', 'd1', 'execute', identity.binding,
+      wrangler, 'd1', 'execute', identity.binding,
       `--${identity.location}`,
       '--json',
       '--config', snapshotConfigPath,
       '--command', renderD1Statement(statement),
       ...(identity.persistTo !== undefined ? ['--persist-to', identity.persistTo] : []),
     ];
-    const result = await runner(pnpm, args, workspaceRoot);
+    const result = await runner(process.execPath, args, workspaceRoot);
     if (result.exitCode !== 0) {
       const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`;
       throw new ToolError('wrangler-exit', `Wrangler D1 execution failed: ${detail}`, 1);

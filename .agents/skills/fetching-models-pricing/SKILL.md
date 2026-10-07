@@ -1,6 +1,6 @@
 ---
 name: fetching-models-pricing
-description: Refresh per-model pricing tables for Floway providers whose upstream does not bill per token or publish usable token rates, especially Copilot, Codex, Claude Code, and Ollama. Manual research procedure; no script.
+description: Refresh notional pricing tables for Codex, Claude Code, and Ollama, or verify Copilot's automatic upstream catalog pricing. Manual research procedure for static tables; Copilot requires no per-model price additions.
 ---
 
 # Fetching Models Pricing
@@ -9,13 +9,36 @@ Maintain the notional per-token rate cards in:
 
 | Provider | Table | Live catalog | Preferred rate source |
 |---|---|---|---|
-| Copilot | `packages/provider-copilot/src/pricing.ts` | Copilot `/models` | model vendor's first-party API |
 | Codex | `packages/provider-codex/src/pricing.ts` | authenticated `/codex/models` | OpenAI API pricing |
 | Claude Code | `packages/provider-claude-code/src/pricing.ts` | authenticated Anthropic `/v1/models` | Anthropic API pricing |
 | Ollama | `packages/provider-ollama/src/pricing.ts` | `/api/tags` + `/api/show` | vendor API or a credible commodity host |
 
-These providers are subscription-backed or self-hosted. Floway records
+These three providers are subscription-backed or self-hosted. Floway records
 notional API-equivalent value so the usage dashboard remains comparable.
+
+## Copilot Automatic Pricing
+
+Copilot pricing is projected from the authenticated `/models` catalog by
+`packages/provider-copilot/src/pricing.ts`, not maintained in a per-model table.
+It records Copilot's published AI-credit prices converted to USD, including
+explicit free rates, rather than the model vendor's notional API price.
+GitHub defines one AI credit as USD 0.01:
+https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
+
+Prices refresh with the existing model-catalog cache: ten minutes fresh, then
+background revalidation on traffic, with a 24-hour hard limit. The dashboard's
+model refresh forces a new fetch. No code change or deployment is needed for
+an upstream-only price change or a new priced model.
+
+When investigating missing or changed Copilot prices, use `$probing-copilot`
+to inspect the raw billing metadata and its batch denominator. Do not fill an
+absent rate from another metric or model. Malformed pricing must surface as an
+error, while models without pricing remain unpriced. Copilot historical
+backfills require a current cached catalog and match the raw `model_key` to
+the merged family's `providerData.rawModels`; they guard that cache snapshot.
+Never automatically rewrite recorded `unit_price` values after a refresh.
+
+## Static Rate Cards
 
 `ModelPricing.entries[].rates` stores decimal-string USD prices per one base
 `BillingMetric` unit. The ten-member `BILLING_METRICS` array in
@@ -102,7 +125,7 @@ subset for a model.
    - Return `null` when no defensible price exists. Never extrapolate from an
      adjacent version or similarly named model.
 5. Increment `MODEL_CATALOG_REVISION` in
-   `packages/gateway/src/data-plane/providers/models-cache.ts`. Static pricing
+   `packages/gateway/src/repo/models-cache-contract.ts`. Derived pricing
    is serialized inside cached `ProviderModel` rows; a mismatch makes every
    older row cold before TTL evaluation.
 6. Add boundary tests for exact ids, aliases, dated releases, RegExp coverage,
@@ -128,10 +151,9 @@ ineligible.
 ## Provider Identity
 
 - Copilot usage stores raw variant suffixes such as `-high`, `-xhigh`, and
-  `-1m` in `model_key`. Its pricing table is keyed by the public id that survives
-  variant merging: catalog projection merges the raw variants first, and
-  `pricingForCopilotPublicModelId` is a plain table match over anchored keys that
-  normalizes nothing itself.
+  `-1m` in `model_key`. Automatic pricing is projected from the raw members of
+  each merged public family; accelerated variants contribute service-tier
+  entries, and context bands use the upstream's published boundary.
 - Claude Code resolves pricing from the dated raw upstream id before catalog
   aliases are merged into public ids.
 - Codex and Ollama use the raw upstream slug directly.

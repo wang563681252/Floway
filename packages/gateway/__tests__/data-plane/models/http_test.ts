@@ -265,6 +265,12 @@ test('/models returns the same superset payload as /v1/models', async () => {
               id: 'claude-opus-4.7-xhigh',
               display_name: 'Claude Opus 4.7 XHigh',
               supported_endpoints: ['/v1/messages'],
+              billing: {
+                token_prices: {
+                  batch_size: 1_000_000,
+                  default: { input_price: 500, cache_price: 50, cache_write_price: 625, output_price: 2500 },
+                },
+              },
             },
             {
               id: 'embedding-only',
@@ -302,7 +308,6 @@ test('/models returns the same superset payload as /v1/models', async () => {
             pricing: {
               entries: [
                 { rates: { input_tokens: '0.000005', output_tokens: '0.000025', input_cache_read_tokens: '0.0000005', input_cache_write_tokens: '0.00000625' } },
-                { selector: { serviceTier: 'fast' }, rates: { input_tokens: '0.00003', output_tokens: '0.00015', input_cache_read_tokens: '0.000003', input_cache_write_tokens: '0.0000375' } },
               ],
             },
           },
