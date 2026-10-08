@@ -28,6 +28,7 @@ export interface SubscriptionPoolAccountRuntime {
   upstreamId: string;
   inFlight: number;
   selections: number;
+  acceptNewSessions: boolean;
   cooldowns: Array<{ modelKey: string; until: number; status: number; failures: number }>;
 }
 
@@ -45,9 +46,12 @@ export interface SubscriptionPoolsRepo {
     token: string;
     now: number;
     expiresAt: number;
+    conversation?: { id: string; apiKeyId: string; isNew: boolean };
   }): Promise<SubscriptionPoolLease | null>;
   renew(token: string, now: number, expiresAt: number): Promise<boolean>;
   release(token: string): Promise<void>;
+  isLeaseActive(token: string, now: number): Promise<boolean>;
+  setAcceptNewSessions(upstreamId: string, accept: boolean): Promise<boolean>;
   observe(input: { upstreamId: string; modelKey: string; status: number; cooldownUntil: number | null }): Promise<void>;
   reset(upstreamId: string): Promise<void>;
 }

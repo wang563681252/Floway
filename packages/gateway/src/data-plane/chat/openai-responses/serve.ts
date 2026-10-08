@@ -4,6 +4,7 @@ import { completeOpenAIResponsesCompaction } from './compaction-resource.ts';
 import type { OpenAIResponsesAttemptResult } from './interceptors/types.ts';
 import { syntheticEventsFromCompaction } from './items/output.ts';
 import { prepareOpenAIResponsesServePlan } from './serve-prep.ts';
+import { createConversationRequest, conversationInputContext } from '../../shared/conversation-context.ts';
 import { iterateCandidates } from '../../shared/iterate-candidates.ts';
 import type { ChatGatewayCtx } from '../shared/gateway-ctx.ts';
 import type { ProtocolFrame } from '@floway-dev/protocols/common';
@@ -45,7 +46,10 @@ export const openaiResponsesServe = {
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
-      { priorityFor: plan.affinitySelection.priorityFor },
+      {
+        priorityFor: plan.affinitySelection.priorityFor,
+        conversation: await createConversationRequest(ctx.conversationSecret, 'responses', plan.conversationPayload, headers, 'generate', ctx.affinity.codec),
+      },
     );
     return result;
   },
@@ -81,15 +85,20 @@ export const openaiResponsesServe = {
         if (result.type === 'result') ctx.affinity.select(candidate);
         return result;
       },
-      { priorityFor: plan.affinitySelection.priorityFor },
+      {
+        priorityFor: plan.affinitySelection.priorityFor,
+        conversation: await createConversationRequest(ctx.conversationSecret, 'responses', plan.conversationPayload, headers, 'compact', ctx.affinity.codec),
+      },
     );
     if (result.type !== 'result') return result;
 
     const stored = wrapOpenAIResponsesStatefulOutput(syntheticEventsFromCompaction(result.result), ctx);
     const persisted = await collectOpenAIResponsesProtocolEventsToResult(stored);
+    const completed = completeOpenAIResponsesCompaction(persisted, openaiResponsesCreatedAt(ctx));
+    await ctx.attempt.conversation?.completed(conversationInputContext('responses', { model: payload.model, input: completed.output }), true);
     return {
       ...result,
-      result: completeOpenAIResponsesCompaction(persisted, openaiResponsesCreatedAt(ctx)),
+      result: completed,
     };
   },
 };

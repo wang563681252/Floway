@@ -173,6 +173,13 @@ export const isOpenAIResponsesCompactShimItem = (
   && typeof item.encrypted_content === 'string'
   && isShimCompactionPayload(decodeBase64UrlJson(item.encrypted_content));
 
+export const decodeOpenAIResponsesCompactShimItem = (item: unknown): OpenAIResponsesInputItem[] | null => {
+  if (!isJsonObject(item) || typeof item.type !== 'string' || !isOpenAIResponsesCompactionItem({ type: item.type })
+    || typeof item.encrypted_content !== 'string') return null;
+  const decoded = decodeBase64UrlJson(item.encrypted_content);
+  return isShimCompactionPayload(decoded) ? decoded : null;
+};
+
 const encodeShimCompactionPayload = (text: string): string =>
   encodeBase64UrlJson([{
     type: 'message',
@@ -184,17 +191,8 @@ export const expandShimCompactionItems = (payload: CanonicalOpenAIResponsesPaylo
   const rewritten: OpenAIResponsesInputItem[] = [];
   let changed = false;
   for (const item of payload.input) {
-    if (!isOpenAIResponsesCompactionItem(item)) {
-      rewritten.push(item);
-      continue;
-    }
-    const encryptedContent = (item as { encrypted_content?: unknown }).encrypted_content;
-    if (typeof encryptedContent !== 'string') {
-      rewritten.push(item);
-      continue;
-    }
-    const decoded = decodeBase64UrlJson(encryptedContent);
-    if (!isShimCompactionPayload(decoded)) {
+    const decoded = decodeOpenAIResponsesCompactShimItem(item);
+    if (decoded === null) {
       // Foreign blob — leave untouched so a native-compaction upstream still
       // sees its own encrypted_content verbatim.
       rewritten.push(item);

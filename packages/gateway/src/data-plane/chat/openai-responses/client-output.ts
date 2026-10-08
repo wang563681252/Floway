@@ -2,11 +2,14 @@ import { wrapOpenAIResponsesAffinityEgress } from './affinity/egress.ts';
 import { wrapOpenAIResponsesClientOutput } from './items/output.ts';
 import { createOpenAIResponsesResponseId } from './response-id.ts';
 import { wrapResponseResourceCompletion } from './response-resource.ts';
+import { conversationContextWithAffinity } from '../../shared/conversation-context.ts';
+import { observeConversationFrames } from '../../shared/conversation-stream.ts';
 import type { GatewayCtx } from '../../shared/gateway-ctx.ts';
 import { affinityEgressOptions } from '../shared/affinity/index.ts';
 import type { ChatGatewayCtx } from '../shared/gateway-ctx.ts';
 import type { ProtocolFrame } from '@floway-dev/protocols/common';
 import type { CanonicalOpenAIResponsesPayload, ClientOpenAIResponsesStreamEvent, OpenAIResponsesStreamEvent } from '@floway-dev/protocols/openai-responses';
+import { collectOpenAIResponsesProtocolEventsToResult, isOpenAIResponsesCompactionItem } from '@floway-dev/protocols/openai-responses';
 
 // Unix seconds, from the gateway's own request-start instant, so both resources
 // date a turn the same way.
@@ -38,9 +41,12 @@ export const wrapOpenAIResponsesClientEgress = (
 ): AsyncIterable<ProtocolFrame<ClientOpenAIResponsesStreamEvent>> => {
   if (!('affinity' in ctx) || !('store' in ctx)) throw new Error('OpenAI Responses output requires chat context');
   const chatCtx = ctx as ChatGatewayCtx;
-  return wrapResponseResourceCompletion(wrapOpenAIResponsesStatefulOutput(frames, chatCtx), {
+  return observeConversationFrames(wrapResponseResourceCompletion(wrapOpenAIResponsesStatefulOutput(frames, chatCtx), {
     request,
     createdAt: openaiResponsesCreatedAt(ctx),
     stored: chatCtx.store.writesState,
-  });
+  }), ctx.attempt.conversation, collectOpenAIResponsesProtocolEventsToResult, response => {
+    if (response.status !== 'completed' && response.status !== 'incomplete') throw new Error('Conversation generation failed after dispatch');
+    return conversationContextWithAffinity('responses', { input: response.output }, chatCtx.affinity.codec);
+  }, response => response.output.some(isOpenAIResponsesCompactionItem));
 };

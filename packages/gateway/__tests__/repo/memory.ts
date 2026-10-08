@@ -1,4 +1,5 @@
 import { aggregatePerformanceForDisplay } from './performance-overview-oracle.ts';
+import { MemorySubscriptionConversationsRepo } from './subscription-conversations-memory.ts';
 import { MemorySubscriptionPoolsRepo } from './subscription-pools-memory.ts';
 import { partitionTelemetryOverviewRecords } from './telemetry-overview-oracle.ts';
 import { buildKeyToUserMap } from '../../src/control-plane/shared/key-to-user.ts';
@@ -17,6 +18,7 @@ import { quantizeOpenAIResponsesRefreshedAt, OPENAI_RESPONSES_REFRESH_GRANULARIT
 import { normalizeProxyFallbackList } from '../../src/repo/proxy-fallback-list.ts';
 import { SEED_ADMIN_USER_ID } from '../../src/repo/seed-admin.ts';
 import { generateSessionToken } from '../../src/repo/session-tokens.ts';
+import type { SubscriptionConversationsRepo } from '../../src/repo/subscription-conversations.ts';
 import type { SubscriptionPoolsRepo } from '../../src/repo/subscription-pools.ts';
 import type {
   ApiKey,
@@ -1484,6 +1486,7 @@ class MemoryAgentSetupRepo implements AgentSetupRepository {
 }
 
 export class InMemoryRepo implements Repo {
+  subscriptionConversations: SubscriptionConversationsRepo;
   subscriptionPools: SubscriptionPoolsRepo;
   apiKeys: ApiKeyRepo;
   users: UsersRepo;
@@ -1514,7 +1517,11 @@ export class InMemoryRepo implements Repo {
     this.performance = new MemoryPerformanceRepo(this.apiKeys);
     this.webSearchConfig = new MemoryWebSearchConfigRepo();
     this.upstreams = new MemoryUpstreamRepo();
-    this.subscriptionPools = new MemorySubscriptionPoolsRepo(this.upstreams);
+    const pools = new MemorySubscriptionPoolsRepo(this.upstreams);
+    this.subscriptionPools = pools;
+    const conversations = new MemorySubscriptionConversationsRepo(this.subscriptionPools);
+    this.subscriptionConversations = conversations;
+    pools.conversations = conversations;
     this.proxies = new MemoryProxyRepo(this.upstreams);
     this.proxyBackoffs = new MemoryProxyBackoffRepo();
     this.modelAliases = new MemoryModelAliasesRepo();

@@ -1,9 +1,11 @@
+import { claudeCodeSubscriptionSession } from './client-session.ts';
 import { CLAUDE_CODE_DEFAULT_FLAGS } from './defaults.ts';
 import { createClaudeCodeProvider } from './provider.ts';
 import { readClaudeCodeSubscriptionAccountStatus } from './subscription-account.ts';
 import type { ProviderModule } from '@floway-dev/provider';
 
 export const claudeCodeProviderModule: ProviderModule = {
+  subscriptionSession: claudeCodeSubscriptionSession,
   subscriptionAccountStatus: readClaudeCodeSubscriptionAccountStatus,
   create: createClaudeCodeProvider,
   defaultFlags: CLAUDE_CODE_DEFAULT_FLAGS,

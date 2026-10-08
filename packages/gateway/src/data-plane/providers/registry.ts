@@ -43,6 +43,9 @@ export const flagDefaultsForKind = (kind: UpstreamProviderKind): FlagDefaults =>
 export const subscriptionAccountStatusForRecord = (record: UpstreamRecord) =>
   providersByKind[record.kind].subscriptionAccountStatus?.(record) ?? null;
 
+export const subscriptionSessionForRequest = (kind: UpstreamProviderKind, headers: Headers, payload: unknown) =>
+  providersByKind[kind].subscriptionSession?.(headers, payload) ?? null;
+
 // The upstream scope is a required argument across the catalog-assembly chain
 // (this, `enumerateAddressableModelIds`, `enumerateModelCandidates`) so a
 // caller can never omit it and silently receive the full, unscoped catalog —

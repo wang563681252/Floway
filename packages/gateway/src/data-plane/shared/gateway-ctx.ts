@@ -1,4 +1,5 @@
 import type { AttemptTiming } from './attempt-timing.ts';
+import type { ConversationTurn } from './conversation-stream.ts';
 import type { RequestBody } from './request-body.ts';
 import { type DumpAccumulator, openDumpAccumulator } from '../../dump/accumulator.ts';
 import { apiKeyFromContext, type AuthedContext, effectiveUpstreamIdsFromContext } from '../../middleware/auth.ts';
@@ -10,11 +11,13 @@ import type { PerformanceTelemetryContext } from '@floway-dev/provider';
 // across candidate resets because the dump accumulator reads the same object.
 // Null timestamps distinguish an unstamped slot from a real timestamp of 0.
 export interface AttemptState {
+  conversation?: ConversationTurn;
   readonly timing: AttemptTiming;
   telemetry: PerformanceTelemetryContext | undefined;
 }
 
 export interface GatewayCtx {
+  readonly conversationSecret?: string;
   readonly apiKeyId: string;
   readonly requestStartedAt: number;
   readonly upstreamIds: readonly string[] | null;
@@ -79,6 +82,7 @@ export const createGatewayCtxFromHono = (c: AuthedContext, opts: CreateGatewayCt
   const dump = openDumpAccumulator(c, opts.method ?? c.req.method, apiKey, opts.requestBody, opts.backgroundScheduler, opts.wantsStream, attempt.timing);
   if (opts.model !== undefined) dump?.requestedModel(opts.model);
   return {
+    conversationSecret: apiKey.serverSecret,
     apiKeyId: apiKey.id,
     requestStartedAt: Date.now(),
     upstreamIds,

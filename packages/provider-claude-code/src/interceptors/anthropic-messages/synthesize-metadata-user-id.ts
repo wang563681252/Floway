@@ -46,7 +46,7 @@ export const synthesizeMetadataUserId = async <TResult>(
 
 // 64-hex (32-byte) device_id, matching the format real CC emits. See
 // https://github.com/Wei-Shaw/sub2api/blob/4a5665da5b2c6b83c4597844ea6e573746c821b1/backend/internal/service/gateway_prompt_test.go#L17
-const deviceIdForUpstream = (upstreamId: string): string =>
+export const deviceIdForUpstream = (upstreamId: string): string =>
   sha256Hex(`claude-code-device:${upstreamId}`);
 
 // Session id derives from the upstream id plus the first user message text,

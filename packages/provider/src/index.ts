@@ -10,6 +10,7 @@ export { providerModelOf } from './invocation.ts';
 
 export type { InternalDebugError } from './error.ts';
 export type { SubscriptionAccountStatus } from './subscription-account.ts';
+export type { SubscriptionClientSession } from './subscription-session.ts';
 export { toInternalDebugError } from './error.ts';
 
 export type {

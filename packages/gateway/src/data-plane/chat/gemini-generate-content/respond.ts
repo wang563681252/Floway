@@ -3,6 +3,8 @@ import { streamSSE } from 'hono/streaming';
 
 import { wrapGeminiGenerateContentAffinityEgress } from './affinity/egress.ts';
 import { geminiGenerateContentStatusForHttpStatus } from './errors.ts';
+import { conversationInputContext } from '../../shared/conversation-context.ts';
+import { observeConversationFrames } from '../../shared/conversation-stream.ts';
 import type { GatewayCtx } from '../../shared/gateway-ctx.ts';
 import { type StreamCompletion, writeSSEFrames } from '../../shared/sse.ts';
 import { recordFailedRequest } from '../../shared/telemetry/performance.ts';
@@ -47,7 +49,11 @@ export const respondGeminiGenerateContent = async (
 
   const state = new SourceStreamState();
   const observed = observeGeminiGenerateContentFrames(result.events, state, ctx);
-  const frames = wrapGeminiGenerateContentAffinityEgress(observed, affinityEgressOptions(ctx));
+  const frames = observeConversationFrames(
+    wrapGeminiGenerateContentAffinityEgress(observed, affinityEgressOptions(ctx)), ctx.attempt.conversation,
+    collectGeminiGenerateContentProtocolEventsToResult,
+    response => conversationInputContext('gemini', { contents: response.candidates?.map(candidate => candidate.content) ?? [] }),
+  );
 
   if (!wantsStream) {
     try {

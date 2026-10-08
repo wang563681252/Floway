@@ -2,7 +2,6 @@ import { AffinityCodec, type AffinityIdentity } from './carrier.ts';
 import { resolveLegacyOpaqueBlobCompatibilityIdentity } from './legacy.ts';
 import { compatibilityIdentityForCandidate } from './selection.ts';
 import type { GatewayCtx } from '../../../shared/gateway-ctx.ts';
-import type { ChatGatewayCtx } from '../gateway-ctx.ts';
 import type { ModelCandidate } from '@floway-dev/provider';
 
 export interface AffinityEgressOptions {
@@ -35,8 +34,12 @@ export class AffinityRequestContext {
   }
 }
 
+export const affinityContextForGateway = (ctx: GatewayCtx): AffinityRequestContext => {
+  if (!('affinity' in ctx) || !(ctx.affinity instanceof AffinityRequestContext)) throw new Error('Chat event result reached responder without affinity context');
+  return ctx.affinity;
+};
+
 export const affinityEgressOptions = (ctx: GatewayCtx): AffinityEgressOptions => {
-  if (!('affinity' in ctx)) throw new Error('Chat event result reached responder without affinity context');
-  const chatCtx = ctx as ChatGatewayCtx;
-  return { codec: chatCtx.affinity.codec, affinity: chatCtx.affinity.selectedTarget() };
+  const affinity = affinityContextForGateway(ctx);
+  return { codec: affinity.codec, affinity: affinity.selectedTarget() };
 };

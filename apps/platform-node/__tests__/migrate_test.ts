@@ -32,7 +32,7 @@ test('applies all real migration files against a fresh sqlite', () => withTemp(a
   assertEquals(dumpColumns.results.some(column => column.name === 'response_upstream_body_descriptor'), true);
   assertEquals(upstreamColumns.results.some(column => column.name === 'config_version'), true);
   const latest = await db.prepare('SELECT name FROM _migrations ORDER BY name DESC LIMIT 2').all<{ name: string }>();
-  assertEquals(latest.results.map(row => row.name), ['0086_subscription_pools.sql', '0085_upstream_config_version.sql']);
+  assertEquals(latest.results.map(row => row.name), ['0087_subscription_conversations.sql', '0086_subscription_pools.sql']);
 
   // Every migration was recorded.
   const recorded = await db.prepare('SELECT COUNT(*) AS n FROM _migrations').first<{ n: number }>();

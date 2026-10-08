@@ -192,6 +192,41 @@ an explicit 429 without queuing, with a known retry time when available.
 Credential-only unavailability returns 503. When actual attempts all fail,
 the last upstream response remains unchanged.
 
+Stable Claude Code and Codex session/thread identities now create durable,
+API-key-isolated conversation bindings. Existing sessions stay on their actual
+account, including across idle periods and gateway restarts. New sessions favor
+accounts with fewer recently active bindings before request load, fresh quota
+and selection history. A busy owner produces an explicit error instead of
+temporarily borrowing another account. Clients without stable identity retain
+request-level scheduling; Floway never guesses a session from prompt text.
+Generic clients can supply `x-floway-conversation-id`, optionally
+`x-floway-conversation-branch` for independent branches and `x-floway-turn-id`
+for duplicate-turn protection. These are not the dashboard authentication
+header `x-floway-session`. Codex per-turn body metadata outranks frozen
+WebSocket handshake headers.
+
+Migration is fidelity-first and only happens after definite account
+unavailability, or an explicitly requested safe handoff. The new request must
+contain the entire completed history, matching directives, tool definitions,
+model/rules and generation settings, complete tool-call/result pairs, and
+replayable attachment bytes. Floway stores a keyed context proof, not another
+copy of message bodies, and does not append history to an already complete
+request. Native opaque compaction, signed thinking, account-owned files,
+missing history and incompatible models prevent migration and preserve the
+original binding. An existing gateway-readable checkpoint can be replayed
+unchanged; Floway does not generate a new summary to make a migration pass.
+
+Dispatch and completion are durable, versioned boundaries. Prepared requests
+whose owners disappear can recover without pretending they ran; dispatched
+requests with unknown execution results become **uncertain** and are never
+automatically repeated. A trustworthy terminal result commits the new binding
+before it reaches the caller. Provider-owned account/device metadata is rebuilt
+for the destination instead of copying the source account's authenticated
+package. Readonly token measurements do not create, advance or migrate
+bindings. If a real upstream rejection prevents a safe handoff, its status,
+headers and body are retained and `x-floway-conversation-error` explains the
+additional routing constraint.
+
 Native image requests and gateway-hosted image generation use the same pool
 capacity controls. Operator-pinned OpenAI search continuations remain on their
 configured account while obeying its concurrency and cooldown state. Catalog
@@ -201,7 +236,8 @@ not consume pool slots.
 The dashboard shows active requests, credential health, quota observation
 freshness, and model cooldowns. **Clear gateway cooldowns** does not replenish
 upstream quotas. Disable a pool to restore normal upstream ordering; removing
-members or deleting a pool requires their active requests to finish.
+members requires their active requests to finish; deleting a pool also
+requires its conversations to be closed.
 Configuration is included in version 21 backups; leases and cooldowns are
 ephemeral and are not exported. Version 20 imports remain supported.
 

@@ -1,3 +1,4 @@
+import type { SubscriptionConversationsRepo } from './subscription-conversations.ts';
 import type { SubscriptionPoolsRepo } from './subscription-pools.ts';
 import type { WebSearchConfig, WebSearchProviderName } from '../shared/web-search-providers.ts';
 import type { AgentSetupRepository } from '@floway-dev/agent-setup';
@@ -563,6 +564,7 @@ export interface ScheduledMaintenanceRepo {
 export type { AgentSetupMutation, AgentSetupRecord, AgentSetupRenewal, AgentSetupRepository } from '@floway-dev/agent-setup';
 
 export interface Repo {
+  subscriptionConversations: SubscriptionConversationsRepo;
   subscriptionPools: SubscriptionPoolsRepo;
   apiKeys: ApiKeyRepo;
   users: UsersRepo;

@@ -1,9 +1,11 @@
+import { codexSubscriptionSession } from './client-identity.ts';
 import { CODEX_DEFAULT_FLAGS } from './defaults.ts';
 import { createCodexProvider } from './provider.ts';
 import { readCodexSubscriptionAccountStatus } from './subscription-account.ts';
 import type { ProviderModule } from '@floway-dev/provider';
 
 export const codexProviderModule: ProviderModule = {
+  subscriptionSession: codexSubscriptionSession,
   subscriptionAccountStatus: readCodexSubscriptionAccountStatus,
   create: createCodexProvider,
   defaultFlags: CODEX_DEFAULT_FLAGS,

@@ -2,13 +2,15 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 
 import { wrapOpenAIChatCompletionsAffinityEgress } from './affinity/egress.ts';
+import { conversationContextWithAffinity } from '../../shared/conversation-context.ts';
+import { observeConversationFrames } from '../../shared/conversation-stream.ts';
 import type { GatewayCtx } from '../../shared/gateway-ctx.ts';
 import { type StreamCompletion, writeSSEFrames } from '../../shared/sse.ts';
 import { recordFailedRequest } from '../../shared/telemetry/performance.ts';
 import { settle } from '../../shared/telemetry/settle.ts';
 import { tokenUsageFromBillableUsage } from '../../shared/telemetry/usage.ts';
 import { forwardUpstreamHeaders, mergeForwardedUpstreamHeaders } from '../../shared/upstream-response.ts';
-import { affinityEgressOptions } from '../shared/affinity/index.ts';
+import { affinityContextForGateway, affinityEgressOptions } from '../shared/affinity/index.ts';
 import { SourceStreamState, eventResultMetadata, plainResultToResponse } from '../shared/respond.ts';
 import { eventFrame, type ProtocolFrame, sseCommentFrame, sseFrame } from '@floway-dev/protocols/common';
 import type { OpenAIChatCompletionsStreamEvent } from '@floway-dev/protocols/openai-chat-completions';
@@ -44,7 +46,12 @@ export const respondOpenAIChatCompletions = async (
 
   const state = new SourceStreamState();
   const observed = observeOpenAIChatCompletionsFrames(result.events, state, ctx);
-  const frames = wrapOpenAIChatCompletionsAffinityEgress(observed, affinityEgressOptions(ctx));
+  const egress = affinityEgressOptions(ctx);
+  const frames = observeConversationFrames(
+    wrapOpenAIChatCompletionsAffinityEgress(observed, egress), ctx.attempt.conversation,
+    collectOpenAIChatCompletionsProtocolEventsToResult,
+    response => conversationContextWithAffinity('chat', { messages: response.choices.map(choice => choice.message) }, affinityContextForGateway(ctx).codec),
+  );
 
   if (!wantsStream) {
     try {

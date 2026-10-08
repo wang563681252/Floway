@@ -2,6 +2,7 @@ import { analyzeGeminiGenerateContentAffinity } from './affinity/ingress.ts';
 import { geminiGenerateContentAttempt, geminiGenerateContentCountTokensTarget, geminiGenerateContentGenerateTarget } from './attempt.ts';
 import { renderGeminiGenerateContentFailure } from './errors.ts';
 import { enumerateModelCandidates } from '../../providers/resolution.ts';
+import { createConversationRequest } from '../../shared/conversation-context.ts';
 import { iterateCandidates } from '../../shared/iterate-candidates.ts';
 import { selectAffinityCandidates } from '../shared/affinity/index.ts';
 import { noViableCandidateFailure } from '../shared/errors.ts';
@@ -55,7 +56,10 @@ export const geminiGenerateContentServe = {
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
-      { priorityFor: selection.priorityFor, errorFormat: 'gemini' },
+      {
+        priorityFor: selection.priorityFor, errorFormat: 'gemini',
+        conversation: await createConversationRequest(ctx.conversationSecret, 'gemini', payload, headers, 'generate', ctx.affinity.codec),
+      },
     );
   },
 
@@ -80,7 +84,10 @@ export const geminiGenerateContentServe = {
       ctx,
       'chat',
       (candidate, attemptCtx) => geminiGenerateContentAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers }),
-      { priorityFor: selection.priorityFor, errorFormat: 'gemini' },
+      {
+        priorityFor: selection.priorityFor, errorFormat: 'gemini',
+        conversation: await createConversationRequest(ctx.conversationSecret, 'gemini', payload, headers, 'measure', ctx.affinity.codec),
+      },
     );
   },
 };

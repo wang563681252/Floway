@@ -2,13 +2,15 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 
 import { wrapAnthropicMessagesAffinityEgress } from './affinity/egress.ts';
+import { conversationContextWithAffinity } from '../../shared/conversation-context.ts';
+import { observeConversationFrames } from '../../shared/conversation-stream.ts';
 import type { GatewayCtx } from '../../shared/gateway-ctx.ts';
 import { type StreamCompletion, writeSSEFrames } from '../../shared/sse.ts';
 import { recordFailedRequest } from '../../shared/telemetry/performance.ts';
 import { settle } from '../../shared/telemetry/settle.ts';
 import { tokenUsageFromBillableUsage } from '../../shared/telemetry/usage.ts';
 import { forwardUpstreamHeaders, mergeForwardedUpstreamHeaders } from '../../shared/upstream-response.ts';
-import { affinityEgressOptions } from '../shared/affinity/index.ts';
+import { affinityContextForGateway, affinityEgressOptions } from '../shared/affinity/index.ts';
 import { SourceStreamState, eventResultMetadata, plainResultToResponse } from '../shared/respond.ts';
 import { anthropicMessagesProtocolFrameToSSEFrame, ANTHROPIC_MESSAGES_MISSING_TERMINAL_MESSAGE, collectAnthropicMessagesProtocolEventsToResult } from '@floway-dev/protocols/anthropic-messages';
 import type { AnthropicMessagesStreamEvent } from '@floway-dev/protocols/anthropic-messages';
@@ -47,7 +49,12 @@ export const respondAnthropicMessages = async (
 
   const state = new SourceStreamState();
   const observed = observeAnthropicMessagesFrames(result.events, state, ctx);
-  const frames = wrapAnthropicMessagesAffinityEgress(observed, affinityEgressOptions(ctx));
+  const egress = affinityEgressOptions(ctx);
+  const frames = observeConversationFrames(
+    wrapAnthropicMessagesAffinityEgress(observed, egress), ctx.attempt.conversation,
+    collectAnthropicMessagesProtocolEventsToResult,
+    response => conversationContextWithAffinity('messages', { messages: [{ role: 'assistant', content: response.content }] }, affinityContextForGateway(ctx).codec),
+  );
 
   if (!wantsStream) {
     try {

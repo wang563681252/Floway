@@ -5,6 +5,7 @@ import { CLAUDE_CODE_DEFAULT_FLAGS } from './defaults.ts';
 import { isClaudeCodeShapedRequest } from './detection.ts';
 import { callClaudeCodeAnthropicMessages } from './fetch.ts';
 import { CLAUDE_CODE_ANTHROPIC_MESSAGES_BOUNDARY, type AnthropicMessagesBoundaryCtx } from './interceptors/anthropic-messages/index.ts';
+import { deviceIdForUpstream } from './interceptors/anthropic-messages/synthesize-metadata-user-id.ts';
 import { buildClaudeCodeCatalog, fetchClaudeCodeModelsList } from './models.ts';
 import { assertClaudeCodeUpstreamState, readClaudeCodeUpstreamState } from './state.ts';
 import { claudeCodeSubscriptionAccountStatus } from './subscription-account.ts';
@@ -65,6 +66,16 @@ export const createClaudeCodeProvider = (record: UpstreamRecord): Provider => {
         model,
         upstreamId: record.id,
       };
+      if (opts.subscriptionSession) {
+        ctx.payload = {
+          ...ctx.payload,
+          metadata: {
+            ...ctx.payload.metadata, user_id: JSON.stringify({
+              device_id: deviceIdForUpstream(record.id), account_uuid: '', session_id: opts.subscriptionSession.sessionId,
+            }),
+          },
+        };
+      }
 
       // Detection runs on the unmodified payload plus the Claude Code
       // fingerprint admitted by the provider module and Anthropic Messages boundaries.

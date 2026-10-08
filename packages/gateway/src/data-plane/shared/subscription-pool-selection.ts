@@ -1,36 +1,40 @@
 import { isEqual } from 'es-toolkit';
 
+import { ConversationPoolSelection } from './conversation-selection.ts';
+import type { ConversationTurn } from './conversation-stream.ts';
 import type { GatewayCtx } from './gateway-ctx.ts';
 import { SUBSCRIPTION_LEASE_MS } from './subscription-pool-lease.ts';
+import { subscriptionPoolModelKey, type PoolIterationOptions } from './subscription-pool-options.ts';
 import { getRepo } from '../../repo/index.ts';
 import type { SubscriptionPool, SubscriptionPoolLease } from '../../repo/subscription-pools.ts';
-import { providerModelOf, type ApiErrorResult, type ModelCandidate } from '@floway-dev/provider';
+import type { ApiErrorResult, ModelCandidate } from '@floway-dev/provider';
 
-export interface PoolIterationOptions {
-  quotaScope?: string;
-  priorityFor?: (candidate: ModelCandidate) => number;
-  errorFormat?: 'openai' | 'anthropic' | 'gemini';
-}
-
-export const subscriptionPoolModelKey = (candidate: ModelCandidate, scope = 'chat'): string =>
-  JSON.stringify([scope, providerModelOf(candidate).upstreamModelId, candidate.rules ?? {}]);
+export { subscriptionPoolModelKey, type PoolIterationOptions };
 
 export class SubscriptionPoolSelection {
+  private readonly conversations: ConversationPoolSelection | undefined;
   private readonly remaining: ModelCandidate[];
   private busy = false;
   private retryAt: number | null = null;
   private retryUnknown = false;
+
+  get conversationFailure() { return this.conversations?.failure; }
 
   constructor(
     candidates: readonly ModelCandidate[],
     private readonly pools: readonly SubscriptionPool[],
     private readonly options: PoolIterationOptions,
   ) {
+    this.conversations = options.conversation ? new ConversationPoolSelection(candidates, pools, options) : undefined;
     this.remaining = [...candidates].toSorted((left, right) =>
       (options.priorityFor?.(left) ?? 0) - (options.priorityFor?.(right) ?? 0));
   }
 
-  async next(ctx: Pick<GatewayCtx, 'abortSignal'>): Promise<{ candidate: ModelCandidate; lease?: SubscriptionPoolLease } | null> {
+  async next(ctx: Pick<GatewayCtx, 'abortSignal'> & { apiKeyId?: string }): Promise<{ candidate: ModelCandidate; lease?: SubscriptionPoolLease; turn?: ConversationTurn } | null> {
+    if (this.conversations) {
+      const selected = await this.conversations.next(ctx);
+      if (selected || this.conversations.failure) return selected;
+    }
     while (this.remaining.length > 0) {
       ctx.abortSignal?.throwIfAborted();
       const first = this.remaining[0]!;
@@ -87,6 +91,18 @@ export class SubscriptionPoolSelection {
   }
 
   unavailable(): ApiErrorResult {
+    if (this.conversations?.failure) {
+      const failure = this.conversations.failure;
+      const headers = new Headers({ 'content-type': 'application/json' });
+      if (failure.retryAt !== null && failure.retryAt > Date.now()) headers.set('retry-after', String(Math.ceil((failure.retryAt - Date.now()) / 1000)));
+      const message = `Conversation remains on its bound account: ${failure.reason}. Context was not discarded and no summary migration was performed.`;
+      const body = this.options.errorFormat === 'anthropic'
+        ? { type: 'error', error: { type: failure.status === 429 ? 'rate_limit_error' : 'api_error', message } }
+        : this.options.errorFormat === 'gemini'
+          ? { error: { code: failure.status, status: failure.status === 429 ? 'RESOURCE_EXHAUSTED' : 'FAILED_PRECONDITION', message } }
+          : { error: { type: 'api_error', code: failure.reason, message } };
+      return { type: 'api-error', source: 'gateway', status: failure.status, headers, body: new TextEncoder().encode(JSON.stringify(body)) };
+    }
     const status = this.busy ? 429 : 503;
     const message = this.busy
       ? 'All caller-visible compatible subscription accounts are busy or rate limited. Retry later.'

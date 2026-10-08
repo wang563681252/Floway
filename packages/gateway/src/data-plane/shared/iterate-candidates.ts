@@ -74,6 +74,8 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
     const selected = await selection.next(ctx);
     if (!selected) break;
     const { candidate } = selected;
+    const turn = selected.turn;
+    ctx.attempt.conversation = turn;
     ctx.attempt.timing.upstreamCallStartedAt = null;
     ctx.attempt.timing.firstOutputTokenAt = null;
     ctx.attempt.telemetry = upstreamPerformanceContext(ctx, candidate, operation);
@@ -84,7 +86,9 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
       lastCredentialFailure = undefined;
       continue;
     }
-    const lease = new SubscriptionRequestLease(getRepo().subscriptionPools, selected.lease, ctx);
+    const lease = new SubscriptionRequestLease(getRepo().subscriptionPools, selected.lease, ctx,
+      turn ? () => turn.failed() : undefined);
+    turn?.attachOwner(() => lease.cancel(), () => lease.close());
     let heldByBody = false;
     let failure: unknown;
     try {
@@ -102,18 +106,35 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
       }
       if (result.type === 'api-error' && result.source === 'upstream' && result.status !== undefined) {
         await recordSubscriptionPoolOutcome(candidate, result.status, result.headers, quotaScope);
+        if (selected.turn) {
+          if (result.status === 429 || result.status === 401 || result.status === 403) await selected.turn.rejected('upstream_rejected');
+          else if (result.status >= 400 && result.status < 500) await selected.turn.rejected('input_rejected');
+          else await selected.turn.failed();
+          if (![429, 401, 403].includes(result.status)) return result;
+        }
       } else if (result.type === 'plain') {
         await recordSubscriptionPoolOutcome(candidate, result.status, result.response?.headers, quotaScope);
+        if (selected.turn) { await selected.turn.failed(); return result; }
+      } else if (selected.turn) {
+        await selected.turn.failed();
+        return result;
       }
       lastFailure = result;
       lastCredentialFailure = undefined;
     } catch (error) {
       failure = error;
       if (candidate.provider.isSubscriptionCredentialError?.(error) && !lease.signal.aborted) {
+        await selected.turn?.rejected('credential_invalid');
+        await recordSubscriptionPoolOutcome(candidate, 401, undefined, quotaScope);
         console.warn('[subscription-pool] credential unavailable before response', candidate.provider.upstreamId);
         lastCredentialFailure = error;
         lastFailure = undefined;
-      } else throw error;
+      } else {
+        try { await selected.turn?.failed(); } catch (stateError) {
+          throw new AggregateError([error, stateError], 'Subscription attempt and conversation persistence failed', { cause: error });
+        }
+        throw error;
+      }
     } finally {
       if (!heldByBody) {
         try {
@@ -129,6 +150,11 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
     if (lastCredentialFailure !== undefined) throw lastCredentialFailure;
     if (candidates.length === 0) throw new Error(`invariant broken: ${invocationLabel} exhausted candidates with neither success nor failure`);
     return selection.unavailable();
+  }
+  if (selection.conversationFailure && lastFailure.type === 'api-error') {
+    const headers = new Headers(lastFailure.headers);
+    headers.set('x-floway-conversation-error', selection.conversationFailure.reason);
+    return { ...lastFailure, headers };
   }
   return lastFailure;
 };

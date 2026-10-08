@@ -17,13 +17,14 @@ export class SubscriptionRequestLease {
     private readonly repo: SubscriptionPoolsRepo,
     private readonly lease: SubscriptionPoolLease,
     private readonly ctx: Pick<GatewayCtx, 'abortSignal' | 'backgroundScheduler'>,
+    private readonly onInterrupted?: () => Promise<void>,
   ) {
     this.signal = ctx.abortSignal ? AbortSignal.any([ctx.abortSignal, this.controller.signal]) : this.controller.signal;
     let reject: (error: unknown) => void = () => { throw new Error('Subscription lease failure handler not initialized'); };
     this.failure = new Promise<never>((_resolve, fail) => { reject = fail; });
     this.reject = reject;
     void this.failure.catch(error => { console.error('[subscription-pool lease]', error); });
-    this.abort = () => { ctx.backgroundScheduler(this.close()); };
+    this.abort = () => { ctx.backgroundScheduler(this.interrupt()); };
     ctx.abortSignal?.addEventListener('abort', this.abort, { once: true });
     this.schedule();
   }
@@ -50,6 +51,21 @@ export class SubscriptionRequestLease {
     return this.closing;
   }
 
+  private async interrupt(): Promise<void> {
+    this.controller.abort(new DOMException('Subscription request interrupted', 'AbortError'));
+    let failure: unknown;
+    try { await this.onInterrupted?.(); } catch (error) { failure = error; }
+    try { await this.close(); } catch (cleanupError) {
+      if (failure !== undefined) throw new AggregateError([failure, cleanupError], 'Conversation interruption and lease cleanup failed', { cause: failure });
+      throw cleanupError;
+    }
+    if (failure !== undefined) throw failure;
+  }
+
+  cancel(): Promise<void> {
+    return this.interrupt();
+  }
+
   async execute<T>(action: () => Promise<T>): Promise<T> {
     this.signal.throwIfAborted();
     return await Promise.race([action(), this.failure]);
@@ -61,14 +77,15 @@ export class SubscriptionRequestLease {
       [Symbol.asyncIterator]() {
         const iterator = events[Symbol.asyncIterator]();
         let finished = false;
-        const finish = async (failure?: unknown): Promise<void> => {
+        const finish = async (failure?: unknown, interrupted = false): Promise<void> => {
           if (finished) return;
           finished = true;
           try {
             try {
               await iterator.return?.();
             } finally {
-              await owner.close();
+              if (interrupted) await owner.interrupt();
+              else await owner.close();
             }
           } catch (cleanupError) {
             if (failure !== undefined) throw new AggregateError([failure, cleanupError], 'Subscription request and cleanup failed', { cause: failure });
@@ -83,16 +100,16 @@ export class SubscriptionRequestLease {
               if (next.done) await finish();
               return next;
             } catch (error) {
-              await finish(error);
+              await finish(error, true);
               throw error;
             }
           },
           async return(): Promise<IteratorResult<T>> {
-            await finish();
+            await finish(undefined, true);
             return { done: true, value: undefined };
           },
           async throw(error: unknown): Promise<IteratorResult<T>> {
-            await finish(error);
+            await finish(error, true);
             throw error;
           },
         };
@@ -115,7 +132,7 @@ export class SubscriptionRequestLease {
         } catch (error) {
           try {
             await reader.cancel(error);
-            await owner.close();
+            await owner.interrupt();
           } catch (cleanupError) {
             controller.error(new AggregateError([error, cleanupError], 'Subscription response and cleanup failed', { cause: error }));
             return;
@@ -127,7 +144,7 @@ export class SubscriptionRequestLease {
         try {
           await reader.cancel(reason);
         } finally {
-          await owner.close();
+          await owner.interrupt();
         }
       },
     });

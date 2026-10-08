@@ -2,6 +2,7 @@ import { analyzeOpenAIChatCompletionsAffinity } from './affinity/ingress.ts';
 import { openaiChatCompletionsAttempt, openaiChatCompletionsTarget } from './attempt.ts';
 import { renderOpenAIChatCompletionsFailure } from './errors.ts';
 import { enumerateModelCandidates } from '../../providers/resolution.ts';
+import { createConversationRequest } from '../../shared/conversation-context.ts';
 import { iterateCandidates } from '../../shared/iterate-candidates.ts';
 import { selectAffinityCandidates } from '../shared/affinity/index.ts';
 import { noViableCandidateFailure } from '../shared/errors.ts';
@@ -50,7 +51,10 @@ export const openaiChatCompletionsServe = {
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
-      { priorityFor: selection.priorityFor },
+      {
+        priorityFor: selection.priorityFor,
+        conversation: await createConversationRequest(ctx.conversationSecret, 'chat', payload, headers, 'generate', ctx.affinity.codec),
+      },
     );
   },
 };

@@ -2,6 +2,7 @@ import { analyzeAnthropicMessagesAffinity } from './affinity/ingress.ts';
 import { anthropicMessagesAttempt, anthropicMessagesGenerateTarget, canServeAnthropicMessagesCountTokens } from './attempt.ts';
 import { renderAnthropicMessagesFailure } from './errors.ts';
 import { enumerateModelCandidates } from '../../providers/resolution.ts';
+import { createConversationRequest } from '../../shared/conversation-context.ts';
 import { iterateCandidates } from '../../shared/iterate-candidates.ts';
 import { selectAffinityCandidates } from '../shared/affinity/index.ts';
 import { noViableCandidateFailure } from '../shared/errors.ts';
@@ -55,7 +56,10 @@ export const anthropicMessagesServe = {
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
-      { priorityFor: selection.priorityFor, errorFormat: 'anthropic' },
+      {
+        priorityFor: selection.priorityFor, errorFormat: 'anthropic',
+        conversation: await createConversationRequest(ctx.conversationSecret, 'messages', payload, headers, 'generate', ctx.affinity.codec),
+      },
     );
   },
 
@@ -81,7 +85,10 @@ export const anthropicMessagesServe = {
       ctx,
       'chat',
       (candidate, attemptCtx) => anthropicMessagesAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers, anthropicBeta }),
-      { priorityFor: selection.priorityFor, errorFormat: 'anthropic' },
+      {
+        priorityFor: selection.priorityFor, errorFormat: 'anthropic',
+        conversation: await createConversationRequest(ctx.conversationSecret, 'messages', payload, headers, 'measure', ctx.affinity.codec),
+      },
     );
   },
 };

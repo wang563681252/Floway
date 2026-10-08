@@ -63,6 +63,7 @@ export type OpenAIResponsesServePlan =
   | { readonly kind: 'failure'; readonly result: ExecuteResult<ProtocolFrame<OpenAIResponsesStreamEvent>> }
   | {
     readonly kind: 'ready';
+    readonly conversationPayload: CanonicalOpenAIResponsesPayload;
     readonly affinitySelection: AffinityCandidateSelection<CanonicalOpenAIResponsesPayload>;
     readonly privatePayloads: ReadonlyMap<string, unknown>;
     readonly candidates: readonly ModelCandidate[];
@@ -116,5 +117,5 @@ export const prepareOpenAIResponsesServePlan = async (args: {
       result: renderOpenAIResponsesFailure(noViableCandidateFailure(sawModel, prepared.model, failedUpstreams)),
     };
   }
-  return { kind: 'ready', affinitySelection: selection, privatePayloads: hydrated.privatePayloads, candidates: selection.candidates };
+  return { kind: 'ready', conversationPayload: hydrated.payload, affinitySelection: selection, privatePayloads: hydrated.privatePayloads, candidates: selection.candidates };
 };

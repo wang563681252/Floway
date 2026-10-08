@@ -1035,6 +1035,32 @@ describe('callCodexOpenAIResponses — upstream classification', () => {
     expect((body.client_metadata as Record<string, unknown>)['x-codex-installation-id']).toBe('caller-installation-id');
   });
 
+  test('pooled conversations preserve logical identity but rebuild all device projections for the destination account', async () => {
+    seedFreshAccessToken();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sseResponse());
+    const body = {
+      input: [], stream: true,
+      client_metadata: { 'x-codex-installation-id': 'source-device', session_id: 'source-session', thread_id: 'source-thread' },
+    };
+    await callCodexOpenAIResponses({
+      upstreamId, account: { ...activeAccount, openaiDeviceId: 'destination-device' }, model, body,
+      headers: new Headers({ 'session-id': 'old-handshake', 'thread-id': 'old-handshake-thread' }), effects: makeEffects(),
+      call: { ...noopUpstreamCallOptions(), subscriptionSession: { sessionId: 'logical-session', threadId: 'logical-branch', turnId: 'logical-turn' } },
+    });
+    const init = fetchSpy.mock.calls[0]?.[1];
+    if (!init) throw new Error('Expected destination request');
+    const headers = new Headers(init.headers);
+    expect(headers.get('session-id')).toBe('logical-session');
+    expect(headers.get('thread-id')).toBe('logical-branch');
+    const turnMetadata: unknown = JSON.parse(headers.get('x-codex-turn-metadata') ?? 'null');
+    expect(turnMetadata).toMatchObject({ installation_id: 'destination-device', session_id: 'logical-session', thread_id: 'logical-branch', turn_id: 'logical-turn' });
+    expect(await readJsonRequest(init)).toMatchObject({
+      client_metadata: {
+        'x-codex-installation-id': 'destination-device', session_id: 'logical-session', thread_id: 'logical-branch', turn_id: 'logical-turn',
+      },
+    });
+  });
+
   test('passes through caller thread-id and x-client-request-id when distinct from session-id', async () => {
     seedFreshAccessToken();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sseResponse());

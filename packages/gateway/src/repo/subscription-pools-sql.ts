@@ -13,6 +13,7 @@ interface PoolRow {
 const conflicts = [
   'Subscription pool provider mismatch',
   'Subscription pool has active requests',
+  'Subscription pool has open conversations',
   'UNIQUE constraint failed: subscription_pool_members.upstream_id',
 ];
 
@@ -75,21 +76,22 @@ export class SqlSubscriptionPoolsRepo implements SubscriptionPoolsRepo {
   }
 
   async deleteAll(): Promise<void> {
+    await this.db.prepare('DELETE FROM subscription_conversations').run();
     await this.db.prepare('DELETE FROM subscription_pool_leases').run();
     await this.db.prepare('DELETE FROM subscription_pools').run();
   }
 
   async runtime(poolId: string, now: number): Promise<SubscriptionPoolAccountRuntime[]> {
-    const { results: members } = await this.db.prepare(`SELECT m.upstream_id, m.selections,
+    const { results: members } = await this.db.prepare(`SELECT m.upstream_id, m.selections, m.accept_new_sessions,
       (SELECT count(*) FROM subscription_pool_leases AS l WHERE l.upstream_id = m.upstream_id AND l.expires_at > ?) AS in_flight
       FROM subscription_pool_members AS m WHERE m.pool_id = ? ORDER BY m.upstream_id`).bind(now, poolId)
-      .all<{ upstream_id: string; selections: number; in_flight: number }>();
+      .all<{ upstream_id: string; selections: number; in_flight: number; accept_new_sessions: number }>();
     const { results: cooldowns } = await this.db.prepare(`SELECT c.upstream_id, c.model_key, c.until_at, c.status, c.failures
       FROM subscription_pool_cooldowns AS c JOIN subscription_pool_members AS m ON m.upstream_id = c.upstream_id
       WHERE m.pool_id = ? AND c.until_at > ?`).bind(poolId, now)
       .all<{ upstream_id: string; model_key: string; until_at: number; status: number; failures: number }>();
     return members.map(member => ({
-      upstreamId: member.upstream_id, selections: member.selections, inFlight: member.in_flight,
+      upstreamId: member.upstream_id, selections: member.selections, inFlight: member.in_flight, acceptNewSessions: member.accept_new_sessions === 1,
       cooldowns: cooldowns.filter(item => item.upstream_id === member.upstream_id)
         .map(item => ({ modelKey: item.model_key, until: item.until_at, status: item.status, failures: item.failures })),
     }));
@@ -102,17 +104,27 @@ export class SqlSubscriptionPoolsRepo implements SubscriptionPoolsRepo {
       FROM subscription_pool_members AS m JOIN subscription_pools AS p ON p.id = m.pool_id
       JOIN upstreams AS u ON u.id = m.upstream_id
       JOIN json_each(?) AS candidate ON json_extract(candidate.value, '$.upstreamId') = m.upstream_id
-      WHERE p.id = ? AND p.enabled = 1 AND u.enabled = 1 AND u.provider = p.provider
+      WHERE p.id = ? AND (p.enabled = 1 OR EXISTS (
+          SELECT 1 FROM subscription_conversations AS bound WHERE bound.id = ? AND bound.pool_id = p.id
+            AND bound.api_key_id = ? AND bound.phase <> 'closed'))
+        AND u.enabled = 1 AND u.provider = p.provider
+        AND (? = 0 OR m.accept_new_sessions = 1)
         AND NOT EXISTS (SELECT 1 FROM subscription_pool_cooldowns AS c
           WHERE c.upstream_id = m.upstream_id AND c.model_key = ? AND c.until_at > ?)
         AND (p.max_concurrent_requests IS NULL OR
           (SELECT count(*) FROM subscription_pool_leases AS l WHERE l.account_identity = json_extract(candidate.value, '$.identity') AND l.expires_at > ?) < p.max_concurrent_requests)
       ORDER BY
+        CASE WHEN ? = 1 THEN (
+          SELECT count(*) FROM subscription_conversations AS bound
+          WHERE bound.account_identity = json_extract(candidate.value, '$.identity')
+            AND bound.phase <> 'closed' AND bound.last_seen_at >= ?) ELSE 0 END,
         (SELECT count(*) FROM subscription_pool_leases AS l WHERE l.account_identity = json_extract(candidate.value, '$.identity') AND l.expires_at > ?),
         COALESCE(json_extract(candidate.value, '$.utilization'), 0.5),
         m.selections, m.upstream_id
       LIMIT 1 RETURNING upstream_id, account_identity`).bind(
-      input.token, input.expiresAt, JSON.stringify(input.candidates), input.poolId, input.modelKey, input.now, input.now, input.now,
+      input.token, input.expiresAt, JSON.stringify(input.candidates), input.poolId,
+      input.conversation?.id ?? null, input.conversation?.apiKeyId ?? null, input.conversation?.isNew ? 1 : 0,
+      input.modelKey, input.now, input.now, input.conversation?.isNew ? 1 : 0, input.now - 30 * 60_000, input.now,
     ).first<{ upstream_id: string; account_identity: string }>();
     if (row === null) return null;
     await this.db.prepare('UPDATE subscription_pool_members SET selections = selections + 1 WHERE upstream_id = ?').bind(row.upstream_id).run();
@@ -127,6 +139,17 @@ export class SqlSubscriptionPoolsRepo implements SubscriptionPoolsRepo {
 
   async release(token: string): Promise<void> {
     await this.db.prepare('DELETE FROM subscription_pool_leases WHERE token = ?').bind(token).run();
+  }
+
+  async isLeaseActive(token: string, now: number): Promise<boolean> {
+    return await this.db.prepare('SELECT token FROM subscription_pool_leases WHERE token = ? AND expires_at > ?')
+      .bind(token, now).first() !== null;
+  }
+
+  async setAcceptNewSessions(upstreamId: string, accept: boolean): Promise<boolean> {
+    const result = await this.db.prepare('UPDATE subscription_pool_members SET accept_new_sessions = ? WHERE upstream_id = ?')
+      .bind(accept ? 1 : 0, upstreamId).run();
+    return result.meta.changes === 1;
   }
 
   async observe(input: Parameters<SubscriptionPoolsRepo['observe']>[0]): Promise<void> {

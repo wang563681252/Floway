@@ -1,5 +1,6 @@
 import { HTTPException } from 'hono/http-exception';
 
+import { subscriptionAccountStatusForRecord } from '../../data-plane/providers/registry.ts';
 import { getRepo } from '../../repo/index.ts';
 import type { StoredUpstreamRecord } from '../../repo/types.ts';
 import { validateSubscriptionPoolMembers } from '../subscription-pools/validation.ts';
@@ -19,6 +20,17 @@ const persistUpstream = async ({ previous, next }: UpstreamChange): Promise<Stor
   return saved;
 };
 
+const requireIdleAccountReplacement = async (changes: readonly UpstreamChange[]): Promise<void> => {
+  const repo = getRepo();
+  for (const { previous, next } of changes) {
+    if (!previous || subscriptionAccountStatusForRecord(previous)?.identity === subscriptionAccountStatusForRecord(next)?.identity) continue;
+    const pool = (await repo.subscriptionPools.list()).find(item => item.upstreamIds.includes(next.id));
+    if (pool && (await repo.subscriptionPools.runtime(pool.id, Date.now())).some(account => account.upstreamId === next.id && account.inFlight > 0)) {
+      throw new HTTPException(409, { message: 'Subscription account identity cannot be replaced while requests are active' });
+    }
+  }
+};
+
 export const saveUpstream = async (change: UpstreamChange): Promise<StoredUpstreamRecord> => {
   const { next } = change;
   const upstreams = getRepo().upstreams;
@@ -28,6 +40,7 @@ export const saveUpstream = async (change: UpstreamChange): Promise<StoredUpstre
     const invalid = await validateSubscriptionPoolMembers(pools, prospective);
     if (invalid) throw new HTTPException(409, { message: invalid });
   }
+  await requireIdleAccountReplacement([change]);
   return await persistUpstream(change);
 };
 
@@ -39,5 +52,6 @@ export const saveUpstreams = async (changes: readonly UpstreamChange[]): Promise
     const invalid = await validateSubscriptionPoolMembers(pools, prospective);
     if (invalid) throw new HTTPException(409, { message: invalid });
   }
+  await requireIdleAccountReplacement(changes);
   for (const change of changes) await persistUpstream(change);
 };
