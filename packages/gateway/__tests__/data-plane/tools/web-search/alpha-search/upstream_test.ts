@@ -1,5 +1,7 @@
-import { test, vi } from 'vitest';
+import { beforeEach, test, vi } from 'vitest';
 
+import { initRepo } from '../../../../../src/repo/index.ts';
+import { InMemoryRepo } from '../../../../repo/memory.ts';
 import type { InboundHeaderMatcher, ModelCandidate } from '@floway-dev/provider';
 import { assertEquals, assertExists, stubModelCandidate, stubProvider } from '@floway-dev/test-utils';
 
@@ -17,6 +19,8 @@ vi.mock('../../../../../src/data-plane/providers/resolution.ts', async importOri
 });
 
 const { resolveAlphaSearchDispatcher } = await import('../../../../../src/data-plane/tools/web-search/alpha-search/upstream.ts');
+
+beforeEach(() => { initRepo(new InMemoryRepo()); });
 
 const dispatcherFor = async (kind: 'codex' | 'custom', inboundHeaderAllowlist: readonly InboundHeaderMatcher[] = []) => {
   let observedHeaders: Headers | undefined;

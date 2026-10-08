@@ -102,7 +102,7 @@ describe('createGatewayCtxFromHono', () => {
     assertEquals(ctx.wantsStream, false);
   });
 
-  test('wantsStream=true: downstreamAbortController is defined and abortSignal matches its signal', async () => {
+  test('wantsStream=true: the factory controller cancels the effective upstream signal', async () => {
     const app = makeApp();
     let ctx: ReturnType<typeof createGatewayCtxFromHono> | undefined;
     app.get('/test', c => {
@@ -112,20 +112,29 @@ describe('createGatewayCtxFromHono', () => {
     await app.request('/test');
     assertExists(ctx);
     assertExists(ctx.downstreamAbortController);
-    assertEquals(ctx.abortSignal, ctx.downstreamAbortController.signal);
+    assertExists(ctx.abortSignal);
+    assertEquals(ctx.abortSignal.aborted, false);
+    ctx.downstreamAbortController.abort('downstream cancelled');
+    assertEquals(ctx.abortSignal.aborted, true);
+    assertEquals(ctx.abortSignal.reason, 'downstream cancelled');
   });
 
-  test('wantsStream=false: downstreamAbortController and abortSignal are both undefined', async () => {
+  test('wantsStream=false: incoming request cancellation reaches the upstream without minting a stream controller', async () => {
     const app = makeApp();
+    const incoming = new AbortController();
     let ctx: ReturnType<typeof createGatewayCtxFromHono> | undefined;
     app.get('/test', c => {
       ctx = createGatewayCtxFromHono(c, { wantsStream: false, requestBody: EMPTY_REQUEST_BODY, backgroundScheduler: NOOP_SCHEDULER });
       return c.text('ok');
     });
-    await app.request('/test');
+    await app.request('/test', { signal: incoming.signal });
     assertExists(ctx);
     assertEquals(ctx.downstreamAbortController, undefined);
-    assertEquals(ctx.abortSignal, undefined);
+    assertExists(ctx.abortSignal);
+    assertEquals(ctx.abortSignal.aborted, false);
+    incoming.abort('incoming request cancelled');
+    assertEquals(ctx.abortSignal.aborted, true);
+    assertEquals(ctx.abortSignal.reason, 'incoming request cancelled');
   });
 
   test('caller-supplied downstreamAbortController overrides the factory-minted one (websocket path)', async () => {
@@ -134,7 +143,7 @@ describe('createGatewayCtxFromHono', () => {
     let controller: AbortController | undefined;
     app.get('/test', c => {
       controller = new AbortController();
-      ctx = createGatewayCtxFromHono(c, { wantsStream: true, downstreamAbortController: controller, requestBody: EMPTY_REQUEST_BODY, backgroundScheduler: NOOP_SCHEDULER });
+      ctx = createGatewayCtxFromHono(c, { wantsStream: true, method: 'WS', downstreamAbortController: controller, requestBody: EMPTY_REQUEST_BODY, backgroundScheduler: NOOP_SCHEDULER });
       return c.text('ok');
     });
     await app.request('/test');
