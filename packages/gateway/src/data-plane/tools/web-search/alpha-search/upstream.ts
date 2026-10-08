@@ -39,7 +39,7 @@ export const resolveAlphaSearchDispatcher = async ({
   return async (body, signal, headers) => {
     const { model: _callerModel, ...request } = body;
     // Search continuations remain bound to the operator-selected upstream.
-    const result = await callBoundSubscriptionAccount(candidate, { abortSignal: signal, backgroundScheduler: scheduler }, pooledSignal => candidate.provider.instance.callAlphaSearch(
+    const result = await callBoundSubscriptionAccount(candidate, { abortSignal: signal, backgroundScheduler: scheduler, quotaScope: 'alpha-search' }, pooledSignal => candidate.provider.instance.callAlphaSearch(
       providerModelOf(candidate),
       request,
       pooledSignal,

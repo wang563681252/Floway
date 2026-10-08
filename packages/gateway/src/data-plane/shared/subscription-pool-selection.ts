@@ -7,12 +7,13 @@ import type { SubscriptionPool, SubscriptionPoolLease } from '../../repo/subscri
 import { providerModelOf, type ApiErrorResult, type ModelCandidate } from '@floway-dev/provider';
 
 export interface PoolIterationOptions {
+  quotaScope?: string;
   priorityFor?: (candidate: ModelCandidate) => number;
   errorFormat?: 'openai' | 'anthropic' | 'gemini';
 }
 
-export const subscriptionPoolModelKey = (candidate: ModelCandidate): string =>
-  JSON.stringify([providerModelOf(candidate).upstreamModelId, candidate.rules ?? {}]);
+export const subscriptionPoolModelKey = (candidate: ModelCandidate, scope = 'chat'): string =>
+  JSON.stringify([scope, providerModelOf(candidate).upstreamModelId, candidate.rules ?? {}]);
 
 export class SubscriptionPoolSelection {
   private readonly remaining: ModelCandidate[];
@@ -62,7 +63,7 @@ export class SubscriptionPoolSelection {
       });
       const repo = getRepo().subscriptionPools;
       const lease = eligible.length === 0 ? null : await repo.acquire({
-        poolId: pool.id, modelKey: subscriptionPoolModelKey(first), candidates: eligible,
+        poolId: pool.id, modelKey: subscriptionPoolModelKey(first, this.options.quotaScope), candidates: eligible,
         token: crypto.randomUUID(), now, expiresAt: now + SUBSCRIPTION_LEASE_MS,
       });
       if (lease) {
@@ -75,7 +76,7 @@ export class SubscriptionPoolSelection {
         this.busy = true;
         const runtimes = await repo.runtime(pool.id, now);
         for (const runtime of runtimes.filter(item => eligible.some(candidate => candidate.upstreamId === item.upstreamId))) {
-          const cooldown = runtime.cooldowns.find(item => item.modelKey === subscriptionPoolModelKey(first));
+          const cooldown = runtime.cooldowns.find(item => item.modelKey === subscriptionPoolModelKey(first, this.options.quotaScope));
           if (cooldown) this.retryAt = Math.min(this.retryAt ?? cooldown.until, cooldown.until);
           else if (runtime.inFlight > 0) this.retryUnknown = true;
         }
@@ -101,7 +102,7 @@ export class SubscriptionPoolSelection {
   }
 }
 
-export const recordSubscriptionPoolOutcome = async (candidate: ModelCandidate, status: number, headers?: Headers): Promise<void> => {
+export const recordSubscriptionPoolOutcome = async (candidate: ModelCandidate, status: number, headers?: Headers, scope = 'chat'): Promise<void> => {
   const now = Date.now();
   const retryAfter = headers?.get('retry-after')?.trim();
   const seconds = retryAfter === undefined ? NaN : Number(retryAfter);
@@ -114,7 +115,7 @@ export const recordSubscriptionPoolOutcome = async (candidate: ModelCandidate, s
   if (status >= 200 && status < 300 || until !== null) {
     await getRepo().subscriptionPools.observe({
       upstreamId: candidate.provider.upstreamId,
-      modelKey: subscriptionPoolModelKey(candidate), status, cooldownUntil: until,
+      modelKey: subscriptionPoolModelKey(candidate, scope), status, cooldownUntil: until,
     });
   }
 };

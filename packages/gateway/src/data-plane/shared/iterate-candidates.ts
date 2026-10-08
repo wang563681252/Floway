@@ -68,7 +68,8 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
 ): Promise<T | ApiErrorResult> => {
   let lastFailure: T | undefined;
   let lastCredentialFailure: unknown;
-  const selection = new SubscriptionPoolSelection(candidates, await getRepo().subscriptionPools.list(), options);
+  const quotaScope = options.quotaScope ?? operation;
+  const selection = new SubscriptionPoolSelection(candidates, await getRepo().subscriptionPools.list(), { ...options, quotaScope });
   while (true) {
     const selected = await selection.next(ctx);
     if (!selected) break;
@@ -89,7 +90,7 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
     try {
       const result = await lease.execute(() => run(candidate, { ...ctx, abortSignal: lease.signal }));
       if (isAttemptSuccess(result)) {
-        await recordSubscriptionPoolOutcome(candidate, 200);
+        await recordSubscriptionPoolOutcome(candidate, 200, undefined, quotaScope);
         if (result.type === 'events' && result.events) {
           result.events = lease.wrapEvents(result.events);
           heldByBody = true;
@@ -100,9 +101,9 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
         return result;
       }
       if (result.type === 'api-error' && result.source === 'upstream' && result.status !== undefined) {
-        await recordSubscriptionPoolOutcome(candidate, result.status, result.headers);
+        await recordSubscriptionPoolOutcome(candidate, result.status, result.headers, quotaScope);
       } else if (result.type === 'plain') {
-        await recordSubscriptionPoolOutcome(candidate, result.status, result.response?.headers);
+        await recordSubscriptionPoolOutcome(candidate, result.status, result.response?.headers, quotaScope);
       }
       lastFailure = result;
       lastCredentialFailure = undefined;

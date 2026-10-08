@@ -6,10 +6,10 @@ import { apiErrorToResponse, providerModelOf, type ModelCandidate, type Provider
 
 export const callBoundSubscriptionAccount = async (
   candidate: ModelCandidate,
-  context: { abortSignal?: AbortSignal; backgroundScheduler: BackgroundScheduler },
+  context: { abortSignal?: AbortSignal; backgroundScheduler: BackgroundScheduler; quotaScope?: string },
   dispatch: (signal: AbortSignal | undefined) => Promise<ProviderCallResult>,
 ): Promise<ProviderCallResult> => {
-  const selection = new SubscriptionPoolSelection([candidate], await getRepo().subscriptionPools.list(), {});
+  const selection = new SubscriptionPoolSelection([candidate], await getRepo().subscriptionPools.list(), { quotaScope: context.quotaScope });
   const selected = await selection.next(context);
   if (!selected) return { response: apiErrorToResponse(selection.unavailable()), modelKey: providerModelOf(candidate).upstreamModelId };
   if (!selected.lease) return await dispatch(context.abortSignal);
@@ -18,7 +18,7 @@ export const callBoundSubscriptionAccount = async (
   let failure: unknown;
   try {
     const result = await lease.execute(() => dispatch(lease.signal));
-    await recordSubscriptionPoolOutcome(candidate, result.response.status, result.response.headers);
+    await recordSubscriptionPoolOutcome(candidate, result.response.status, result.response.headers, context.quotaScope);
     if (result.response.ok && result.response.body) {
       ownsBody = true;
       return { ...result, response: lease.wrapResponse(result.response) };

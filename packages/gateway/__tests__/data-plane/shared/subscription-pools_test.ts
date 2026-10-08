@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest';
 
 import { createProvider } from '../../../src/data-plane/providers/registry.ts';
 import { iterateCandidates } from '../../../src/data-plane/shared/iterate-candidates.ts';
+import { callBoundSubscriptionAccount } from '../../../src/data-plane/shared/subscription-pool-call.ts';
 import { subscriptionPoolModelKey } from '../../../src/data-plane/shared/subscription-pool-selection.ts';
 import { initRepo } from '../../../src/repo/index.ts';
 import { InMemoryRepo } from '../../repo/memory.ts';
@@ -193,4 +194,19 @@ test('a raw response owns its lease until its body is consumed and preserves hea
   expect(result.response.headers.get('x-request-id')).toBe('original-request');
   expect(await result.response.text()).toBe('exact body');
   expect((await repo.subscriptionPools.runtime('pool', Date.now()))[0]?.inFlight).toBe(0);
+});
+
+test('pinned search requests obey capacity but their rate limits cannot block chat on the same account', async () => {
+  const { repo, candidates, ctx } = await setup(1);
+  const candidate = candidates[0]!;
+  const response = new Response('search rate limit', { status: 429, headers: { 'retry-after': '60' } });
+  const first = await callBoundSubscriptionAccount(candidate, { ...ctx, quotaScope: 'alpha-search' }, async () => ({ response, modelKey: 'model' }));
+  expect(first.response).toBe(response);
+  const blocked = vi.fn(async () => ({ response: new Response('must not run'), modelKey: 'model' }));
+  const second = await callBoundSubscriptionAccount(candidate, { ...ctx, quotaScope: 'alpha-search' }, blocked);
+  expect(second.response.status).toBe(429);
+  expect(blocked).not.toHaveBeenCalled();
+  const chat = await iterateCandidates([candidate], 'test', ctx, 'chat', async () => ({ type: 'result' as const }));
+  expect(chat.type).toBe('result');
+  expect((await repo.subscriptionPools.runtime('pool', Date.now())).every(account => account.inFlight === 0)).toBe(true);
 });

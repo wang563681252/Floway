@@ -178,8 +178,7 @@ restrictions, then select compatible accounts atomically by current load,
 observed quota utilization, and selection history. Quota observations older
 than five minutes are unknown rather than permanently blocking an account.
 Codex active-limit families are not model identities: their utilization guides
-ranking, while a real 429 establishes a cooldown for the requested model and
-alias rules. Upstream `Retry-After` is honored; without it, 429 uses a 30-second
+ranking, while a real 429 establishes a cooldown for the requested model, operation, and alias rules. Upstream `Retry-After` is honored; without it, 429 uses a 30-second
 gateway cooldown, 401/403 uses 60 seconds, and upstream 5xx uses five seconds.
 These are local retry policies, not estimates of vendor quota recovery.
 

@@ -1009,7 +1009,7 @@ const resolveImageCandidate = async (
   if (match !== undefined) {
     const selection = new SubscriptionPoolSelection(
       resolution.candidates.filter(candidate => candidate.model.endpoints[endpointKey] !== undefined),
-      await getRepo().subscriptionPools.list(), {},
+      await getRepo().subscriptionPools.list(), { quotaScope: isEdit ? 'image_edit' : 'image_generation' },
     );
     const selected = await selection.next({ abortSignal: state.downstreamAbortSignal });
     if (!selected) {
@@ -1306,7 +1306,7 @@ const streamImageGeneration = (
         resolved.lease !== undefined,
       );
       ({ response, modelKey } = resolved.lease ? await resolved.lease.execute(issue) : await issue());
-      if (resolved.lease) await recordSubscriptionPoolOutcome(resolved.candidate, response.status, response.headers);
+      if (resolved.lease) await recordSubscriptionPoolOutcome(resolved.candidate, response.status, response.headers, isEdit ? 'image_edit' : 'image_generation');
     } catch (e) {
       return finish({ ok: false, error: serverError(e) });
     }
