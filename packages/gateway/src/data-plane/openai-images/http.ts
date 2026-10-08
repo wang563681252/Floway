@@ -86,9 +86,9 @@ export const openaiImagesGenerations = async (c: Context): Promise<Response> => 
     model: request.model,
     kind: 'image',
     modelServesEndpoint: model => model.endpoints.openaiImagesGenerations !== undefined,
-    call: (provider, model, opts) => {
+    call: (provider, model, opts, signal) => {
       const { model: _model, ...body } = request.body;
-      return provider.instance.callOpenAIImagesGenerations(model, body, undefined, opts);
+      return provider.instance.callOpenAIImagesGenerations(model, body, signal, opts);
     },
     response: { format: 'json', extractBilling: tokenUsageFromOpenAIImagesBody },
   });
@@ -111,7 +111,7 @@ const serveOpenAIImagesEditRequest = async (
     model,
     kind: 'image',
     modelServesEndpoint: model => model.endpoints.openaiImagesEdits !== undefined,
-    call: (provider, model, opts) => provider.instance.callOpenAIImagesEdits(model, request, undefined, opts),
+    call: (provider, model, opts, signal) => provider.instance.callOpenAIImagesEdits(model, request, signal, opts),
     response: { format: 'json', extractBilling: tokenUsageFromOpenAIImagesBody },
   });
   return finalizeGatewayResponse(ctx, response);

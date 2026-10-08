@@ -158,6 +158,54 @@ Absent rates remain unpriced rather than becoming zero or borrowing another
 model's price. Recorded usage keeps its original unit-price snapshot;
 historical backfills are explicit and require a current cached Copilot catalog.
 
+### Smart subscription account pools
+
+Under **Providers → Account Pools**, group independently authorized **Codex**
+or **Claude Code** upstreams of the same provider. Each upstream represents one
+distinct account and can belong to one pool only. Existing API-key/user
+upstream permissions still apply; a pool never grants access to another member.
+Keep member model IDs addressable in the same way, or use existing model aliases
+to expose the desired compatible targets.
+
+New pools default to **50 concurrent model requests per account**, configurable
+to another positive integer or **Unlimited**. This counts active requests, not
+idle sessions. Unlimited disables only Floway's local limit; it does not bypass
+provider quotas, authorization, or server capacity. Use only accounts and
+subscription access permitted by the upstream provider.
+
+Enabled pools skip inactive credentials and fresh, provider-confirmed account
+restrictions, then select compatible accounts atomically by current load,
+observed quota utilization, and selection history. Quota observations older
+than five minutes are unknown rather than permanently blocking an account.
+Codex active-limit families are not model identities: their utilization guides
+ranking, while a real 429 establishes a cooldown for the requested model and
+alias rules. Upstream `Retry-After` is honored; without it, 429 uses a 30-second
+gateway cooldown, 401/403 uses 60 seconds, and upstream 5xx uses five seconds.
+These are local retry policies, not estimates of vendor quota recovery.
+
+Caller-carried affinity takes priority over load balancing. A pinned or opaque
+stateful conversation may have only one compatible account, and cannot be
+moved just because another member is idle. Once streaming opens, Floway never
+replays that request on another account. Active request leases are renewed
+until completion or cancellation; crashed owners expire after two minutes.
+If every compatible visible account is busy or restricted, requests receive
+an explicit 429 without queuing, with a known retry time when available.
+Credential-only unavailability returns 503. When actual attempts all fail,
+the last upstream response remains unchanged.
+
+Native image requests and gateway-hosted image generation use the same pool
+capacity controls. Operator-pinned OpenAI search continuations remain on their
+configured account while obeying its concurrency and cooldown state. Catalog
+refreshes, OAuth refreshes, and quota probes are not inference requests and do
+not consume pool slots.
+
+The dashboard shows active requests, credential health, quota observation
+freshness, and model cooldowns. **Clear gateway cooldowns** does not replenish
+upstream quotas. Disable a pool to restore normal upstream ordering; removing
+members or deleting a pool requires their active requests to finish.
+Configuration is included in version 21 backups; leases and cooldowns are
+ephemeral and are not exported. Version 20 imports remain supported.
+
 ## Other Deployment Options
 
 ### Cloudflare Workers

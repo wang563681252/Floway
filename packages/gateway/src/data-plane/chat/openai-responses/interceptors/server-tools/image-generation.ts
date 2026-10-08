@@ -1,8 +1,11 @@
+import { getRepo } from '../../../../../repo/index.ts';
 import { sleep } from '../../../../../shared/sleep.ts';
 import { enumerateModelCandidates } from '../../../../providers/resolution.ts';
 import { stampUpstreamCallStart } from '../../../../shared/attempt-timing.ts';
 import { appendFailedUpstreams } from '../../../../shared/failed-upstreams.ts';
 import type { AttemptState } from '../../../../shared/gateway-ctx.ts';
+import { SubscriptionRequestLease } from '../../../../shared/subscription-pool-lease.ts';
+import { recordSubscriptionPoolOutcome, SubscriptionPoolSelection } from '../../../../shared/subscription-pool-selection.ts';
 import { recordPerformance, type PerformanceTelemetryContext } from '../../../../shared/telemetry/performance.ts';
 import { recordTokenUsage, tokenUsageFromOpenAIImagesBody } from '../../../../shared/telemetry/usage.ts';
 import { createExternalImageFetcher, type ExternalImageFetchResult } from '../../../shared/external-image-loader.ts';
@@ -987,7 +990,7 @@ const serverError = (e: unknown): ImageError => ({
 const resolveImageCandidate = async (
   isEdit: boolean,
   state: ShimState,
-): Promise<{ ok: true; candidate: ModelCandidate } | { ok: false; error: ImageError }> => {
+): Promise<{ ok: true; candidate: ModelCandidate; lease?: SubscriptionRequestLease } | { ok: false; error: ImageError }> => {
   const endpointKey = isEdit ? 'openaiImagesEdits' : 'openaiImagesGenerations';
   const endpointPath = isEdit ? '/images/edits' : '/images/generations';
   let resolution;
@@ -1004,7 +1007,25 @@ const resolveImageCandidate = async (
   }
   const match = resolution.candidates.find(c => c.model.endpoints[endpointKey] !== undefined);
   if (match !== undefined) {
-    return { ok: true, candidate: match };
+    const selection = new SubscriptionPoolSelection(
+      resolution.candidates.filter(candidate => candidate.model.endpoints[endpointKey] !== undefined),
+      await getRepo().subscriptionPools.list(), {},
+    );
+    const selected = await selection.next({ abortSignal: state.downstreamAbortSignal });
+    if (!selected) {
+      const failure = selection.unavailable();
+      const error = errorFromBody(new TextDecoder().decode(failure.body), failure.status);
+      return { ok: false, error: { ...error, type: error.type ?? 'image_generation_error', retryable: true } };
+    }
+    return {
+      ok: true,
+      candidate: selected.candidate,
+      ...(selected.lease ? {
+        lease: new SubscriptionRequestLease(getRepo().subscriptionPools, selected.lease, {
+          abortSignal: state.downstreamAbortSignal, backgroundScheduler: state.backgroundScheduler,
+        }),
+      } : {}),
+    };
   }
   // Split on the resolver's `sawModel` signal the same way serve-prep.ts
   // does for chat: an unknown model id ("model_not_found", 404-shaped) vs
@@ -1084,6 +1105,7 @@ const issueImageCall = async (
   state: ShimState,
   stream: boolean,
   attempt: AttemptState,
+  pooled = false,
 ): Promise<{ response: Response; modelKey: string }> => {
   for (let retry = 0; ; retry++) {
     const opts = {
@@ -1100,7 +1122,7 @@ const issueImageCall = async (
     const { response, modelKey } = await (editRequest === null
       ? provider.instance.callOpenAIImagesGenerations(model, buildGenerationsBody(prompt, config, stream), state.downstreamAbortSignal, opts)
       : provider.instance.callOpenAIImagesEdits(model, editRequest, state.downstreamAbortSignal, opts));
-    if (response.status !== 429 || retry >= MAX_RATE_LIMIT_RETRIES) return { response, modelKey };
+    if (response.status !== 429 || pooled || retry >= MAX_RATE_LIMIT_RETRIES) return { response, modelKey };
 
     // 25% jitter desynchronizes parallel callers so a burst of orchestrator
     // turns doesn't all re-issue at the same instant.
@@ -1245,79 +1267,86 @@ const streamImageGeneration = (
 ) => async function* (): AsyncGenerator<ServerToolLifecycleEvent, ServerToolTerminal> {
   const resolved = await resolveImageCandidate(isEdit, state);
   if (!resolved.ok) return imageTerminal(prompt, action, { ok: false, error: resolved.error });
-  const { provider, fetcher } = resolved.candidate;
-  const model = providerModelOf(resolved.candidate);
-  const wantsPartials = (state.config.partial_images ?? 0) > 0;
-
-  const attempt: AttemptState = { timing: { upstreamCallStartedAt: null, firstOutputTokenAt: null }, telemetry: undefined };
-  const perfContext: PerformanceTelemetryContext = {
-    keyId: state.apiKeyId,
-    model: model.id,
-    upstream: provider.upstreamId,
-    operation: isEdit ? 'image_edit' : 'image_generation',
-    runtimeLocation: state.runtimeLocation,
-  };
-  const finish = (outcome: ImageOutcome): ServerToolTerminal => {
-    recordPerformance({ attempt, backgroundScheduler: state.backgroundScheduler }, perfContext, !outcome.ok, 0, performance.now());
-    return imageTerminal(prompt, action, outcome);
-  };
-
-  let response: Response;
-  let modelKey: string;
   try {
-    let editRequest: OpenAIImagesEditsRequest | null = null;
-    if (isEdit) {
-      const prepared = await prepareEditRequest(sources, state.config);
-      editRequest = buildEditsRequest(prompt, state.config, prepared.sources, prepared.mask, wantsPartials);
+    const { provider, fetcher } = resolved.candidate;
+    const model = providerModelOf(resolved.candidate);
+    const wantsPartials = (state.config.partial_images ?? 0) > 0;
+
+    const attempt: AttemptState = { timing: { upstreamCallStartedAt: null, firstOutputTokenAt: null }, telemetry: undefined };
+    const perfContext: PerformanceTelemetryContext = {
+      keyId: state.apiKeyId,
+      model: model.id,
+      upstream: provider.upstreamId,
+      operation: isEdit ? 'image_edit' : 'image_generation',
+      runtimeLocation: state.runtimeLocation,
+    };
+    const finish = (outcome: ImageOutcome): ServerToolTerminal => {
+      recordPerformance({ attempt, backgroundScheduler: state.backgroundScheduler }, perfContext, !outcome.ok, 0, performance.now());
+      return imageTerminal(prompt, action, outcome);
+    };
+
+    let response: Response;
+    let modelKey: string;
+    try {
+      let editRequest: OpenAIImagesEditsRequest | null = null;
+      if (isEdit) {
+        const prepared = await prepareEditRequest(sources, state.config);
+        editRequest = buildEditsRequest(prompt, state.config, prepared.sources, prepared.mask, wantsPartials);
+      }
+      const issue = () => issueImageCall(
+        provider,
+        model,
+        fetcher,
+        prompt,
+        editRequest,
+        state.config,
+        resolved.lease ? { ...state, downstreamAbortSignal: resolved.lease.signal } : state,
+        wantsPartials,
+        attempt,
+        resolved.lease !== undefined,
+      );
+      ({ response, modelKey } = resolved.lease ? await resolved.lease.execute(issue) : await issue());
+      if (resolved.lease) await recordSubscriptionPoolOutcome(resolved.candidate, response.status, response.headers);
+    } catch (e) {
+      return finish({ ok: false, error: serverError(e) });
     }
-    ({ response, modelKey } = await issueImageCall(
-      provider,
-      model,
-      fetcher,
-      prompt,
-      editRequest,
-      state.config,
-      state,
-      wantsPartials,
-      attempt,
-    ));
-  } catch (e) {
-    return finish({ ok: false, error: serverError(e) });
-  }
 
-  if (!wantsPartials) {
-    return finish(await consumeImageResponse(provider, model, modelKey, response, state));
-  }
-
-  if (!response.ok) {
-    const { type, code, message } = errorFromBody(await response.text(), response.status);
-    return finish({ ok: false, error: { type: type ?? 'image_generation_error', code, message, retryable: isRetryableImageError(code, type) } });
-  }
-  if (response.body === null) {
-    return finish({ ok: false, error: { type: 'image_generation_error', message: 'Image backend returned a streaming response with no body.', code: 'server_error', retryable: true } });
-  }
-
-  let finalB64: string | undefined;
-  let finalEcho: EchoFields = {};
-  let usage: unknown;
-  for await (const frame of parseSSEStream(response.body, { signal: state.downstreamAbortSignal })) {
-    const signal = parseImageStreamEvent(frame.data);
-    if (signal === null) continue;
-    if (signal.kind === 'partial') {
-      yield { type: 'response.image_generation_call.partial_image', partial_image_index: signal.index, partial_image_b64: signal.b64, ...signal.echo };
-    } else if (signal.kind === 'completed') {
-      finalB64 = signal.b64;
-      finalEcho = signal.echo;
-      usage = signal.usage;
-    } else {
-      return finish({ ok: false, error: signal.error });
+    if (!wantsPartials) {
+      return finish(await consumeImageResponse(provider, model, modelKey, response, state));
     }
+
+    if (!response.ok) {
+      const { type, code, message } = errorFromBody(await response.text(), response.status);
+      return finish({ ok: false, error: { type: type ?? 'image_generation_error', code, message, retryable: isRetryableImageError(code, type) } });
+    }
+    if (response.body === null) {
+      return finish({ ok: false, error: { type: 'image_generation_error', message: 'Image backend returned a streaming response with no body.', code: 'server_error', retryable: true } });
+    }
+
+    let finalB64: string | undefined;
+    let finalEcho: EchoFields = {};
+    let usage: unknown;
+    for await (const frame of parseSSEStream(response.body, { signal: state.downstreamAbortSignal })) {
+      const signal = parseImageStreamEvent(frame.data);
+      if (signal === null) continue;
+      if (signal.kind === 'partial') {
+        yield { type: 'response.image_generation_call.partial_image', partial_image_index: signal.index, partial_image_b64: signal.b64, ...signal.echo };
+      } else if (signal.kind === 'completed') {
+        finalB64 = signal.b64;
+        finalEcho = signal.echo;
+        usage = signal.usage;
+      } else {
+        return finish({ ok: false, error: signal.error });
+      }
+    }
+    if (finalB64 === undefined) {
+      return finish({ ok: false, error: { type: 'image_generation_error', message: 'Image backend stream ended without a completed image.', code: 'server_error', retryable: true } });
+    }
+    recordImageUsage(state, provider, model, modelKey, { usage });
+    return finish({ ok: true, b64: finalB64, echo: finalEcho });
+  } finally {
+    await resolved.lease?.close();
   }
-  if (finalB64 === undefined) {
-    return finish({ ok: false, error: { type: 'image_generation_error', message: 'Image backend stream ended without a completed image.', code: 'server_error', retryable: true } });
-  }
-  recordImageUsage(state, provider, model, modelKey, { usage });
-  return finish({ ok: true, b64: finalB64, echo: finalEcho });
 };
 
 // Output-as-input round-trip: the multi-turn loop feeds accumulated

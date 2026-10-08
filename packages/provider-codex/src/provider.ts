@@ -7,6 +7,7 @@ import { CODEX_OPENAI_RESPONSES_BOUNDARY } from './interceptors/openai-responses
 import type { OpenAIResponsesBoundaryCtx } from './interceptors/openai-responses/types.ts';
 import { codexImageProviderModel, codexPlanSupportsImages, codexRawToProviderModel, fetchCodexCatalog } from './models.ts';
 import { assertCodexUpstreamState, findCodexAccountIndex, persistCodexRefreshTokenRotation, persistCodexTerminalState } from './state.ts';
+import { codexSubscriptionAccountStatus } from './subscription-account.ts';
 import { runInterceptors } from '@floway-dev/interceptor';
 import { getProviderRepo, resolveEffectiveFlags, type ProviderInstance, type Provider, type ProviderCallResult, type ProviderOpenAIResponsesResult, type ProviderStreamResult, type UpstreamRecord } from '@floway-dev/provider';
 
@@ -162,6 +163,8 @@ export const createCodexProvider = (record: UpstreamRecord): Provider => {
   };
 
   return {
+    getSubscriptionAccountStatus: async () => codexSubscriptionAccountStatus((await readActiveAccount()).account),
+    isSubscriptionCredentialError: error => error instanceof CodexOAuthSessionTerminatedError,
     upstreamId: record.id,
     kind: 'codex',
     name: record.name,

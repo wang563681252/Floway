@@ -45,11 +45,12 @@ export const openaiChatCompletionsServe = {
       'openaiChatCompletionsServe.generate',
       ctx,
       'chat',
-      async candidate => {
-        const result = await openaiChatCompletionsAttempt.generate({ payload: selection.payloadFor(candidate), ctx, candidate, headers });
+      async (candidate, attemptCtx) => {
+        const result = await openaiChatCompletionsAttempt.generate({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers });
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
+      { priorityFor: selection.priorityFor },
     );
   },
 };

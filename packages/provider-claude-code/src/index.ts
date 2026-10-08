@@ -1,8 +1,10 @@
 import { CLAUDE_CODE_DEFAULT_FLAGS } from './defaults.ts';
 import { createClaudeCodeProvider } from './provider.ts';
+import { readClaudeCodeSubscriptionAccountStatus } from './subscription-account.ts';
 import type { ProviderModule } from '@floway-dev/provider';
 
 export const claudeCodeProviderModule: ProviderModule = {
+  subscriptionAccountStatus: readClaudeCodeSubscriptionAccountStatus,
   create: createClaudeCodeProvider,
   defaultFlags: CLAUDE_CODE_DEFAULT_FLAGS,
 };

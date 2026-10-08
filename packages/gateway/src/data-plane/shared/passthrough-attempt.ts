@@ -41,7 +41,7 @@ export interface PassthroughAttemptArgs {
   // request-body shaping (`{ model: _, ...body }`) local. Any throw here
   // is preserved and the serve layer turns it into a 502 with the
   // internal-debug envelope.
-  readonly call: (provider: Provider, model: ProviderModel, opts: UpstreamCallOptions) => Promise<ProviderCallResult>;
+  readonly call: (provider: Provider, model: ProviderModel, opts: UpstreamCallOptions, signal: AbortSignal | undefined) => Promise<ProviderCallResult>;
 }
 
 // Statuses whose response is defined to carry no body; constructing a Response
@@ -71,6 +71,7 @@ export const passthroughAttempt = async (args: PassthroughAttemptArgs): Promise<
     candidate.provider,
     providerModelOf(candidate),
     buildUpstreamCallOptions(candidate, ctx, inboundHeaders(c)),
+    ctx.abortSignal,
   );
   return {
     type: 'plain',

@@ -6,6 +6,7 @@ import { parseDisabledPublicModelIdsWire } from '../../repo/disabled-public-mode
 import { isOpenAIResponsesRetentionSeconds, OPENAI_RESPONSES_RETENTION_MAX_SECONDS, OPENAI_RESPONSES_RETENTION_MIN_SECONDS } from '../../repo/openai-responses-retention.ts';
 import { isDirectFallbackId, normalizeProxyFallbackList } from '../../repo/proxy-fallback-list.ts';
 import { SEED_ADMIN_USER_ID } from '../../repo/seed-admin.ts';
+import type { SubscriptionPool } from '../../repo/subscription-pools.ts';
 import type { ApiKey, PerformanceMetric, PerformanceTelemetryRecord, UsageRecord, User, WebSearchUsageRecord } from '../../repo/types.ts';
 import { PASSWORD_HASH_SCHEME } from '../../shared/passwords.ts';
 import { RETENTION_MAX_SECONDS } from '../../shared/retention.ts';
@@ -32,6 +33,7 @@ export interface SerializedProxy {
 }
 
 export interface ParsedImportData {
+  subscriptionPools: SubscriptionPool[];
   users: User[];
   apiKeys: ApiKey[];
   upstreams: UpstreamRecord[];
@@ -497,6 +499,20 @@ export const parseImportData = (value: unknown): ImportDataParseResult => {
   }
   const proxies = parseCollection('proxies', proxySchema, value.proxies, { arrayError: 'proxies must be an array', optional: true });
   if (proxies.type === 'invalid') return proxies;
+  const poolSchema = z.object({
+    id: z.string().min(1), name: z.string().trim().min(1), provider: z.enum(['codex', 'claude-code']),
+    enabled: z.boolean(), maxConcurrentRequests: z.number().int().positive().nullable(),
+    upstreamIds: z.array(z.string().min(1)).min(1), createdAt: z.string().datetime(),
+  }).strict().refine(pool => new Set(pool.upstreamIds).size === pool.upstreamIds.length, {
+    message: 'Subscription pool members must be distinct',
+  });
+  const subscriptionPools = parseCollection('subscriptionPools', poolSchema, value.subscriptionPools, {
+    arrayError: 'subscriptionPools must be an array', optional: true,
+  });
+  if (subscriptionPools.type === 'invalid') return subscriptionPools;
+  if (new Set(subscriptionPools.records.map(pool => pool.id)).size !== subscriptionPools.records.length) {
+    return { type: 'invalid', error: 'invalid subscriptionPools: duplicate pool id' };
+  }
   const proxyIds = new Map<string, number>();
   for (let index = 0; index < proxies.records.length; index++) {
     const prior = proxyIds.get(proxies.records[index].id);
@@ -534,6 +550,7 @@ export const parseImportData = (value: unknown): ImportDataParseResult => {
   return {
     type: 'ok',
     data: {
+      subscriptionPools: subscriptionPools.records,
       users: users.records,
       apiKeys: apiKeys.records,
       upstreams: upstreams.records,

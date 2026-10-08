@@ -50,11 +50,12 @@ export const anthropicMessagesServe = {
       'anthropicMessagesServe.generate',
       ctx,
       'chat',
-      async candidate => {
-        const result = await anthropicMessagesAttempt.generate({ payload: selection.payloadFor(candidate), ctx, candidate, headers, anthropicBeta });
+      async (candidate, attemptCtx) => {
+        const result = await anthropicMessagesAttempt.generate({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers, anthropicBeta });
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
+      { priorityFor: selection.priorityFor, errorFormat: 'anthropic' },
     );
   },
 
@@ -79,7 +80,8 @@ export const anthropicMessagesServe = {
       'anthropicMessagesServe.countTokens',
       ctx,
       'chat',
-      candidate => anthropicMessagesAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx, candidate, headers, anthropicBeta }),
+      (candidate, attemptCtx) => anthropicMessagesAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers, anthropicBeta }),
+      { priorityFor: selection.priorityFor, errorFormat: 'anthropic' },
     );
   },
 };

@@ -357,7 +357,19 @@ export const updateUpstream = async (c: CtxWithJson<typeof updateUpstreamBody, '
 export const deleteUpstream = async (c: AuthedContext<'/:id'>) => {
   const id = c.req.param('id');
   const repo = getRepo();
-  const deleted = await repo.upstreams.delete(id);
+  const pool = (await repo.subscriptionPools.list()).find(item => item.upstreamIds.includes(id));
+  if (pool && (await repo.subscriptionPools.runtime(pool.id, Date.now())).some(account => account.upstreamId === id && account.inFlight > 0)) {
+    return c.json({ error: 'Subscription pool has active requests' }, 409);
+  }
+  let deleted: boolean;
+  try {
+    deleted = await repo.upstreams.delete(id);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Subscription pool has active requests')) {
+      return c.json({ error: 'Subscription pool has active requests' }, 409);
+    }
+    throw error;
+  }
   if (!deleted) return c.json({ error: 'Upstream not found' }, 404);
   // No FK from proxy_upstream_backoffs to upstreams; clean up explicitly.
   await repo.proxyBackoffs.resetForUpstream(id);

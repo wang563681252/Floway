@@ -27,7 +27,7 @@ import type { AuthedContext } from '../../middleware/auth.ts';
 import type { TokenUsage } from '../../repo/types.ts';
 import { enumerateModelCandidates } from '../providers/resolution.ts';
 import { doneFrame, eventFrame, type ModelKind, parseSSEStream, parseTargetStreamFrames, type ProtocolFrame, sseCommentFrame, sseFrame } from '@floway-dev/protocols/common';
-import { httpResponseToResponse, ProviderModelsUnavailableError, toInternalDebugError } from '@floway-dev/provider';
+import { apiErrorToResponse, httpResponseToResponse, ProviderModelsUnavailableError, toInternalDebugError } from '@floway-dev/provider';
 import type { PerformanceOperation, PerformanceTelemetryContext, InternalModel, Provider, ProviderCallResult, ProviderModel, TelemetryModelIdentity, UpstreamCallOptions } from '@floway-dev/provider';
 
 // `json` (OpenAI Embeddings, OpenAI Images): single-shot body,
@@ -81,7 +81,7 @@ interface PassthroughServeContext {
   readonly modelServesEndpoint: (model: InternalModel) => boolean;
   // Any throw here is preserved and becomes a 502 with the internal-debug
   // envelope. `model` is the emitting upstream's `ProviderModel`.
-  readonly call: (provider: Provider, model: ProviderModel, opts: UpstreamCallOptions) => Promise<ProviderCallResult>;
+  readonly call: (provider: Provider, model: ProviderModel, opts: UpstreamCallOptions, signal: AbortSignal | undefined) => Promise<ProviderCallResult>;
   readonly response: PassthroughResponseHandling;
 }
 
@@ -148,11 +148,15 @@ export const passthroughServe = async (input: PassthroughServeContext): Promise<
       'passthroughServe',
       ctx,
       operation,
-      candidate => passthroughAttempt({
-        c, ctx, candidate, operation,
+      (candidate, attemptCtx) => passthroughAttempt({
+        c, ctx: attemptCtx, candidate, operation,
         call,
       }),
     );
+    if (result.type === 'api-error') {
+      ctx.dump?.error('gateway');
+      return apiErrorToResponse(result);
+    }
     const { response, performance: performanceContext, identity } = result;
 
     if (responseHandling.format === 'strategy') {

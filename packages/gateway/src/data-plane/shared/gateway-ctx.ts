@@ -69,6 +69,10 @@ export interface CreateGatewayCtxOptions {
 
 export const createGatewayCtxFromHono = (c: AuthedContext, opts: CreateGatewayCtxOptions): GatewayCtx => {
   const controller = opts.downstreamAbortController ?? (opts.wantsStream ? new AbortController() : undefined);
+  const incomingSignal = opts.method === 'WS' ? undefined : c.req.raw.signal;
+  const abortSignal = controller
+    ? incomingSignal ? AbortSignal.any([controller.signal, incomingSignal]) : controller.signal
+    : incomingSignal;
   const apiKey = apiKeyFromContext(c);
   const upstreamIds = effectiveUpstreamIdsFromContext(c);
   const attempt: AttemptState = { timing: { firstOutputTokenAt: null, upstreamCallStartedAt: null }, telemetry: undefined };
@@ -78,7 +82,7 @@ export const createGatewayCtxFromHono = (c: AuthedContext, opts: CreateGatewayCt
     apiKeyId: apiKey.id,
     requestStartedAt: Date.now(),
     upstreamIds,
-    abortSignal: controller?.signal,
+    abortSignal,
     wantsStream: opts.wantsStream,
     downstreamAbortController: controller,
     backgroundScheduler: opts.backgroundScheduler,

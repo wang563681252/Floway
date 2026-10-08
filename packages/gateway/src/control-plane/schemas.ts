@@ -618,6 +618,16 @@ export const webSearchConfigSchema = z.object({
 
 // --- model aliases ---
 
+export const subscriptionPoolBody = z.object({
+  name: z.string().trim().min(1).max(100),
+  provider: z.enum(['codex', 'claude-code']),
+  enabled: z.boolean().default(true),
+  max_concurrent_requests: z.number().int().positive().nullable().default(50),
+  upstream_ids: z.array(z.string().min(1)).min(1).max(100),
+}).strict().refine(body => new Set(body.upstream_ids).size === body.upstream_ids.length, {
+  message: 'Subscription pool members must be distinct', path: ['upstream_ids'],
+});
+
 // Per-target chat rules. Field names mirror the IR slot each value overlays.
 // Values forward verbatim — no capability narrowing here, so an operator
 // can drive a feature the catalog hasn't advertised yet. All open-string
@@ -738,7 +748,7 @@ export const updateAliasBody = aliasBodyCore.superRefine(aliasBodyRulesRefinemen
 // --- data transfer ---
 
 export const importBody = z.object({
-  version: z.literal(20, { error: 'version must be 20 — older export formats are not supported; re-export from the current deployment' }),
+  version: z.union([z.literal(20), z.literal(21)], { error: 'version must be 20 or 21 — older export formats are not supported; re-export from the current deployment' }),
   mode: z.enum(['merge', 'replace'], { error: "mode must be 'merge' or 'replace'" }),
   data: z.unknown().optional(),
 });

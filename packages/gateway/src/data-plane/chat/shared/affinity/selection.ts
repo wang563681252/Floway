@@ -17,6 +17,7 @@ export type CandidateAffinityEvaluation<T> =
 export interface AffinityCandidateSelection<T> {
   readonly candidates: readonly ModelCandidate[];
   readonly payloadFor: (candidate: ModelCandidate) => T;
+  readonly priorityFor: (candidate: ModelCandidate) => number;
 }
 
 export type AffinitySelectionFailure = Extract<ChatServeFailure, { kind: 'routing-unavailable' }>;
@@ -174,6 +175,11 @@ export const selectAffinityCandidates = <T>(
   const evaluations = new WeakMap(ordered.map(item => [item.candidate, item.evaluation]));
   return {
     candidates: ordered.map(item => item.candidate),
+    priorityFor: candidate => {
+      const evaluation = evaluations.get(candidate);
+      if (!evaluation) throw new Error('Affinity priority requested for an unselected candidate');
+      return evaluation.degrades ? 2 : evaluation.preferred ? 0 : 1;
+    },
     payloadFor: candidate => {
       const evaluation = evaluations.get(candidate);
       if (evaluation === undefined) throw new Error('Affinity payload requested for a candidate outside the selected set');

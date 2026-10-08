@@ -50,11 +50,12 @@ export const geminiGenerateContentServe = {
       'geminiGenerateContentServe.generate',
       ctx,
       'chat',
-      async candidate => {
-        const result = await geminiGenerateContentAttempt.generate({ payload: selection.payloadFor(candidate), ctx, candidate, headers });
+      async (candidate, attemptCtx) => {
+        const result = await geminiGenerateContentAttempt.generate({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers });
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
+      { priorityFor: selection.priorityFor, errorFormat: 'gemini' },
     );
   },
 
@@ -78,7 +79,8 @@ export const geminiGenerateContentServe = {
       'geminiGenerateContentServe.countTokens',
       ctx,
       'chat',
-      candidate => geminiGenerateContentAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx, candidate, headers }),
+      (candidate, attemptCtx) => geminiGenerateContentAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers }),
+      { priorityFor: selection.priorityFor, errorFormat: 'gemini' },
     );
   },
 };

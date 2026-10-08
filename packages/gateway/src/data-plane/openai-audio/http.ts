@@ -78,7 +78,7 @@ export const openaiAudioTranscriptions = async (c: Context): Promise<Response> =
     model: request.model,
     kind: 'transcription',
     modelServesEndpoint: model => model.endpoints.openaiAudioTranscriptions !== undefined,
-    call: (provider, model, opts) => provider.instance.callOpenAIAudioTranscriptions(model, { entries: request.entries }, ctx.abortSignal, opts),
+    call: (provider, model, opts, signal) => provider.instance.callOpenAIAudioTranscriptions(model, { entries: request.entries }, signal, opts),
     response: { format: 'strategy', respond: respondOpenAIAudioTranscription },
   });
   return finalizeGatewayResponse(ctx, response);

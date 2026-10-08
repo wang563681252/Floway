@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { GatewayCtx } from '../../../src/data-plane/shared/gateway-ctx.ts';
 import { iterateCandidates } from '../../../src/data-plane/shared/iterate-candidates.ts';
+import { initRepo } from '../../../src/repo/index.ts';
+import { InMemoryRepo } from '../../repo/memory.ts';
 import { mockGatewayCtx } from '../../test-utils/gateway-ctx.ts';
 import type { ModelCandidate, PerformanceTelemetryContext } from '@floway-dev/provider';
 import { mockPerfTelemetryContext, stubModelCandidate, stubProvider } from '@floway-dev/test-utils';
@@ -26,6 +28,8 @@ const stubCandidate = (id: string, upstream = 'up'): ModelCandidate =>
 // `attempt.telemetry`. Building through mockGatewayCtx keeps the stub aligned
 // with the real GatewayCtx shape.
 const stubCtx = (attempt: GatewayCtx['attempt']): GatewayCtx => mockGatewayCtx({ attempt });
+
+beforeEach(() => { initRepo(new InMemoryRepo()); });
 
 describe('iterateCandidates', () => {
   it('clears the timing slots and stamps telemetry from the current candidate on entry', async () => {

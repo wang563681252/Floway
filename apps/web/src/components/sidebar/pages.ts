@@ -47,6 +47,7 @@ export const navGroups: NavGroup[] = [
     labelKey: 'dashboard.groups.providers',
     items: [
       { to: '/dashboard/providers/upstreams', labelKey: 'dashboard.nav.upstreams', icon: Cloud20Color, adminOnly: true },
+      { to: '/dashboard/providers/subscription-pools', labelKey: 'dashboard.nav.subscriptionPools', icon: People20Color, adminOnly: true },
       { to: '/dashboard/providers/search', labelKey: 'dashboard.nav.search', icon: SearchSparkle20Color, adminOnly: true },
       { to: '/dashboard/providers/proxy', labelKey: 'dashboard.nav.proxy', icon: ShareAndroid20Color, adminOnly: true },
       { to: '/dashboard/providers/model-aliases', labelKey: 'dashboard.nav.modelAliases', icon: TextEditStyle20Color, adminOnly: true },

@@ -1,11 +1,13 @@
 import { ensureClaudeCodeAccessToken } from './access-token.ts';
+import { ClaudeCodeOAuthSessionTerminatedError } from './auth/oauth.ts';
 import { assertClaudeCodeUpstreamRecord } from './config.ts';
 import { CLAUDE_CODE_DEFAULT_FLAGS } from './defaults.ts';
 import { isClaudeCodeShapedRequest } from './detection.ts';
 import { callClaudeCodeAnthropicMessages } from './fetch.ts';
 import { CLAUDE_CODE_ANTHROPIC_MESSAGES_BOUNDARY, type AnthropicMessagesBoundaryCtx } from './interceptors/anthropic-messages/index.ts';
 import { buildClaudeCodeCatalog, fetchClaudeCodeModelsList } from './models.ts';
-import { assertClaudeCodeUpstreamState } from './state.ts';
+import { assertClaudeCodeUpstreamState, readClaudeCodeUpstreamState } from './state.ts';
+import { claudeCodeSubscriptionAccountStatus } from './subscription-account.ts';
 import { runInterceptors } from '@floway-dev/interceptor';
 import type { AnthropicMessagesStreamEvent } from '@floway-dev/protocols/anthropic-messages';
 import {
@@ -119,6 +121,12 @@ export const createClaudeCodeProvider = (record: UpstreamRecord): Provider => {
   };
 
   return {
+    isSubscriptionCredentialError: error => error instanceof ClaudeCodeOAuthSessionTerminatedError,
+    getSubscriptionAccountStatus: async () => {
+      const fresh = await getProviderRepo().upstreams.getById(record.id);
+      if (fresh === null) throw new Error(`Claude Code upstream ${record.id} disappeared while reading account status`);
+      return claudeCodeSubscriptionAccountStatus(readClaudeCodeUpstreamState(fresh.state).accounts[0]);
+    },
     upstreamId: record.id,
     kind: 'claude-code',
     name: record.name,

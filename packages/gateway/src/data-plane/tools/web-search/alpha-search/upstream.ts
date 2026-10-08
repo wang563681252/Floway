@@ -1,5 +1,6 @@
 import { enumerateModelCandidates } from '../../../providers/resolution.ts';
 import { filterInboundHeadersForProvider } from '../../../shared/inbound-headers.ts';
+import { callBoundSubscriptionAccount } from '../../../shared/subscription-pool-call.ts';
 import type { WebSearchConfig } from '../types.ts';
 import type { BackgroundScheduler } from '@floway-dev/platform';
 import { identityWrapUpstreamCall, providerModelOf } from '@floway-dev/provider';
@@ -37,19 +38,18 @@ export const resolveAlphaSearchDispatcher = async ({
 
   return async (body, signal, headers) => {
     const { model: _callerModel, ...request } = body;
-    // TODO: pin SearchRequest.id to one provider account when Codex upstreams
-    // support account pools. The current Codex provider has one active account.
-    const result = await candidate.provider.instance.callAlphaSearch(
+    // Search continuations remain bound to the operator-selected upstream.
+    const result = await callBoundSubscriptionAccount(candidate, { abortSignal: signal, backgroundScheduler: scheduler }, pooledSignal => candidate.provider.instance.callAlphaSearch(
       providerModelOf(candidate),
       request,
-      signal,
+      pooledSignal,
       {
         fetcher: candidate.fetcher,
         waitUntil: scheduler,
         headers: filterInboundHeadersForProvider(headers, candidate.provider),
         wrapUpstreamCall: identityWrapUpstreamCall,
       },
-    );
+    ));
     return result.response;
   };
 };

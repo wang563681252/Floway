@@ -1,6 +1,9 @@
 import type { GatewayCtx } from './gateway-ctx.ts';
+import { SubscriptionRequestLease } from './subscription-pool-lease.ts';
+import { recordSubscriptionPoolOutcome, SubscriptionPoolSelection, type PoolIterationOptions } from './subscription-pool-selection.ts';
 import { upstreamPerformanceContext } from './telemetry/attribution.ts';
-import type { ModelCandidate, PerformanceOperation } from '@floway-dev/provider';
+import { getRepo } from '../../repo/index.ts';
+import type { ApiErrorResult, ModelCandidate, PerformanceOperation } from '@floway-dev/provider';
 
 // A serve-layer attempt result counts as success when:
 //   - The SSE event stream actually opened (`type: 'events'`). Mid-stream
@@ -17,10 +20,10 @@ import type { ModelCandidate, PerformanceOperation } from '@floway-dev/provider'
 // carries the raw upstream Response plus per-attempt telemetry alongside
 // the status; the success discriminant is unchanged.
 type IterableAttemptResult =
-  | { readonly type: 'events' }
+  | { readonly type: 'events'; events?: AsyncIterable<unknown> }
   | { readonly type: 'result' }
-  | { readonly type: 'plain'; readonly status: number }
-  | { readonly type: 'api-error' }
+  | { readonly type: 'plain'; readonly status: number; response?: Response }
+  | { readonly type: 'api-error'; readonly status?: number; readonly headers?: Headers; readonly source?: string }
   | { readonly type: 'internal-error' };
 
 const isAttemptSuccess = (result: IterableAttemptResult): boolean => {
@@ -60,19 +63,71 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
   invocationLabel: string,
   ctx: GatewayCtx,
   operation: PerformanceOperation,
-  run: (candidate: ModelCandidate) => Promise<T>,
-): Promise<T> => {
+  run: (candidate: ModelCandidate, attemptCtx: GatewayCtx) => Promise<T>,
+  options: PoolIterationOptions = {},
+): Promise<T | ApiErrorResult> => {
   let lastFailure: T | undefined;
-  for (const candidate of candidates) {
+  let lastCredentialFailure: unknown;
+  const selection = new SubscriptionPoolSelection(candidates, await getRepo().subscriptionPools.list(), options);
+  while (true) {
+    const selected = await selection.next(ctx);
+    if (!selected) break;
+    const { candidate } = selected;
     ctx.attempt.timing.upstreamCallStartedAt = null;
     ctx.attempt.timing.firstOutputTokenAt = null;
     ctx.attempt.telemetry = upstreamPerformanceContext(ctx, candidate, operation);
-    const result = await run(candidate);
-    if (isAttemptSuccess(result)) return result;
-    lastFailure = result;
+    if (!selected.lease) {
+      const result = await run(candidate, ctx);
+      if (isAttemptSuccess(result)) return result;
+      lastFailure = result;
+      lastCredentialFailure = undefined;
+      continue;
+    }
+    const lease = new SubscriptionRequestLease(getRepo().subscriptionPools, selected.lease, ctx);
+    let heldByBody = false;
+    let failure: unknown;
+    try {
+      const result = await lease.execute(() => run(candidate, { ...ctx, abortSignal: lease.signal }));
+      if (isAttemptSuccess(result)) {
+        await recordSubscriptionPoolOutcome(candidate, 200);
+        if (result.type === 'events' && result.events) {
+          result.events = lease.wrapEvents(result.events);
+          heldByBody = true;
+        } else if (result.type === 'plain' && result.response?.body) {
+          result.response = lease.wrapResponse(result.response);
+          heldByBody = true;
+        }
+        return result;
+      }
+      if (result.type === 'api-error' && result.source === 'upstream' && result.status !== undefined) {
+        await recordSubscriptionPoolOutcome(candidate, result.status, result.headers);
+      } else if (result.type === 'plain') {
+        await recordSubscriptionPoolOutcome(candidate, result.status, result.response?.headers);
+      }
+      lastFailure = result;
+      lastCredentialFailure = undefined;
+    } catch (error) {
+      failure = error;
+      if (candidate.provider.isSubscriptionCredentialError?.(error) && !lease.signal.aborted) {
+        console.warn('[subscription-pool] credential unavailable before response', candidate.provider.upstreamId);
+        lastCredentialFailure = error;
+        lastFailure = undefined;
+      } else throw error;
+    } finally {
+      if (!heldByBody) {
+        try {
+          await lease.close();
+        } catch (cleanupError) {
+          if (failure !== undefined) throw new AggregateError([failure, cleanupError], 'Subscription attempt and cleanup failed', { cause: failure });
+          throw cleanupError;
+        }
+      }
+    }
   }
   if (lastFailure === undefined) {
-    throw new Error(`invariant broken: ${invocationLabel} exhausted candidates with neither success nor failure`);
+    if (lastCredentialFailure !== undefined) throw lastCredentialFailure;
+    if (candidates.length === 0) throw new Error(`invariant broken: ${invocationLabel} exhausted candidates with neither success nor failure`);
+    return selection.unavailable();
   }
   return lastFailure;
 };

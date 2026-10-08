@@ -14,7 +14,7 @@ import { recordUsage } from '../shared/telemetry/usage.ts';
 import { forwardUpstreamResponse } from '../shared/upstream-response.ts';
 import { parseDecimalString, type RerankSourceProtocol } from '@floway-dev/protocols/common';
 import { parseRerankRequest, parseRerankResponse, parseRerankUsage, renderRerankResponse, rerankRequestIncompatibility, type CanonicalRerankResponse, type ParsedRerankRequest } from '@floway-dev/protocols/rerank';
-import { httpResponseToResponse, ProviderModelsUnavailableError, providerModelOf, toInternalDebugError } from '@floway-dev/provider';
+import { apiErrorToResponse, httpResponseToResponse, ProviderModelsUnavailableError, providerModelOf, toInternalDebugError } from '@floway-dev/provider';
 import type { TelemetryModelIdentity } from '@floway-dev/provider';
 
 const apiError = (c: Context, message: string, status: ContentfulStatusCode): Response =>
@@ -109,13 +109,18 @@ export const rerank = (sourceProtocol: RerankSourceProtocol) => async (c: Contex
       return finalizeGatewayResponse(ctx, apiError(c, `Model ${model} does not support this rerank request: ${reasons.join('; ')}.`, 400));
     }
 
-    terminal = await iterateCandidates(
+    const selected = await iterateCandidates(
       viable.map(({ candidate }) => candidate),
       'rerank',
       ctx,
       'rerank',
-      candidate => rerankAttempt(c, ctx, candidate, request),
+      (candidate, attemptCtx) => rerankAttempt(c, attemptCtx, candidate, request),
     );
+    if (selected.type === 'api-error') {
+      ctx.dump?.error('gateway');
+      return finalizeGatewayResponse(ctx, apiErrorToResponse(selected));
+    }
+    terminal = selected;
 
     if (!terminal.response.ok) {
       ctx.dump?.error('upstream', terminal.identity.upstream);

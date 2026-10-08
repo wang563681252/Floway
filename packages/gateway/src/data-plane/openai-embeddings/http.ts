@@ -28,9 +28,9 @@ export const openaiEmbeddings = async (c: Context): Promise<Response> => {
     model: request.model,
     kind: 'embedding',
     modelServesEndpoint: model => model.endpoints.openaiEmbeddings !== undefined,
-    call: async (provider, model, opts) => {
+    call: async (provider, model, opts, signal) => {
       const { model: _model, ...body } = request.body;
-      return await provider.instance.callOpenAIEmbeddings(model, body, undefined, opts);
+      return await provider.instance.callOpenAIEmbeddings(model, body, signal, opts);
     },
     response: { format: 'json', extractBilling: tokenUsageFromOpenAIEmbeddingsBody },
   });

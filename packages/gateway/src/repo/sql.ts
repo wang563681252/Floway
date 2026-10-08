@@ -11,6 +11,8 @@ import { SqlScheduledMaintenanceRepo } from './scheduled-maintenance-sql.ts';
 import { generateSessionToken } from './session-tokens.ts';
 import { SqlSpilledFilesRepo } from './spilled-files-sql.ts';
 import { runStatements } from './sql-batch.ts';
+import { SqlSubscriptionPoolsRepo } from './subscription-pools-sql.ts';
+import type { SubscriptionPoolsRepo } from './subscription-pools.ts';
 import type {
   ApiKey,
   ApiKeyRepo,
@@ -1684,6 +1686,7 @@ class SqlAgentSetupRepo implements AgentSetupRepository {
 }
 
 export class SqlRepo implements Repo {
+  subscriptionPools: SubscriptionPoolsRepo;
   users: UsersRepo;
   sessions: SessionsRepo;
   apiKeys: ApiKeyRepo;
@@ -1703,6 +1706,7 @@ export class SqlRepo implements Repo {
   agentSetup: AgentSetupRepository;
 
   constructor(db: SqlDatabase) {
+    this.subscriptionPools = new SqlSubscriptionPoolsRepo(db);
     this.users = new SqlUsersRepo(db);
     this.sessions = new SqlSessionsRepo(db);
     this.apiKeys = new SqlApiKeyRepo(db);

@@ -5,6 +5,7 @@ export const PREVIEW_LABEL_KEYS = [
   'users',
   'apiKeys',
   'upstreams',
+  'subscriptionPools',
   'proxies',
   'usage',
   'searchUsage',

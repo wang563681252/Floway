@@ -32,19 +32,20 @@ export const openaiResponsesServe = {
       'openaiResponsesServe.generate',
       ctx,
       'chat',
-      async candidate => {
+      async (candidate, attemptCtx) => {
         const result = await openaiResponsesAttempt.generate({
           payload: plan.affinitySelection.payloadFor(candidate),
           sourceState: {
             privatePayloads: plan.privatePayloads,
           },
-          ctx,
+          ctx: { ...ctx, abortSignal: attemptCtx.abortSignal },
           candidate,
           headers,
         });
         if (result.type === 'events') ctx.affinity.select(candidate);
         return result;
       },
+      { priorityFor: plan.affinitySelection.priorityFor },
     );
     return result;
   },
@@ -66,20 +67,21 @@ export const openaiResponsesServe = {
       'openaiResponsesServe.compact',
       ctx,
       'chat',
-      async candidate => {
+      async (candidate, attemptCtx) => {
         const result = await openaiResponsesAttempt.invoke({
           payload: plan.affinitySelection.payloadFor(candidate),
           sourceState: {
             privatePayloads: plan.privatePayloads,
           },
           action: 'compact',
-          ctx,
+          ctx: { ...ctx, abortSignal: attemptCtx.abortSignal },
           candidate,
           headers,
         });
         if (result.type === 'result') ctx.affinity.select(candidate);
         return result;
       },
+      { priorityFor: plan.affinitySelection.priorityFor },
     );
     if (result.type !== 'result') return result;
 

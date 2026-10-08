@@ -4,6 +4,7 @@ import type { OpenAIImagesEditsRequest } from './images.ts';
 import type { ModelPrefixConfig } from './model-prefix.ts';
 import type { ProviderModel, UpstreamModelsCache, UpstreamProviderKind, UpstreamRecord } from './model.ts';
 import type { Fetcher } from './options.ts';
+import type { SubscriptionAccountStatus } from './subscription-account.ts';
 import type { AnthropicMessagesPayload, AnthropicMessagesStreamEvent } from '@floway-dev/protocols/anthropic-messages';
 import type { ProtocolFrame, RerankTarget } from '@floway-dev/protocols/common';
 import type { OpenAIChatCompletionsPayload, OpenAIChatCompletionsStreamEvent } from '@floway-dev/protocols/openai-chat-completions';
@@ -26,6 +27,8 @@ export type OpenAIResponsesAction = 'generate' | 'compact';
 export type InboundHeaderMatcher = string | RegExp;
 
 export interface Provider {
+  getSubscriptionAccountStatus?: () => Promise<SubscriptionAccountStatus>;
+  isSubscriptionCredentialError?: (error: unknown) => boolean;
   upstreamId: string;
   kind: UpstreamProviderKind;
   name: string;
@@ -159,6 +162,7 @@ export interface ProviderInstance {
 // off the same object. Adding a new dispatch slot means a field here, not
 // a parallel per-kind map.
 export interface ProviderModule {
+  subscriptionAccountStatus?: (record: UpstreamRecord) => SubscriptionAccountStatus;
   // Instance factory: capture the record and return closures. Sync — any
   // I/O the provider needs (token refresh, state persistence, catalog
   // fetch) happens on demand inside the per-request methods on the

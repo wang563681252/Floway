@@ -6,6 +6,7 @@ const data = {
   users: [],
   apiKeys: [],
   upstreams: [],
+  subscriptionPools: [],
   proxies: [],
   usage: [],
   searchUsage: [],
@@ -26,7 +27,13 @@ describe('backup file validation', () => {
   });
 
   it('rejects a superseded envelope version outright', () => {
-    expect(parseBackupFile(backup({ version: BACKUP_FILE_VERSION - 1 })).ok).toBe(false);
+    expect(parseBackupFile(backup({ version: 19 })).ok).toBe(false);
+  });
+
+  it('accepts version 20 without pools and rejects a version 21 file that drops them', () => {
+    const { subscriptionPools: _pools, ...legacy } = data;
+    expect(parseBackupFile(backup({ version: 20, data: legacy })).ok).toBe(true);
+    expect(parseBackupFile(backup({ data: legacy })).ok).toBe(false);
   });
 
   it('rejects unknown fields instead of stripping them', () => {

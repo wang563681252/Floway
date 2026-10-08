@@ -15,16 +15,19 @@ import { notifyDisabledBestEffort } from '../../dump/registry.ts';
 import { type CtxWithJson, type CtxWithQuery } from '../../middleware/zod-validator.ts';
 import { getRepo } from '../../repo/index.ts';
 import { DIRECT_FALLBACK_IDS } from '../../repo/proxy-fallback-list.ts';
+import type { SubscriptionPool } from '../../repo/subscription-pools.ts';
 import type { ApiKey, PerformanceTelemetryRecord, UsageRecord, User, WebSearchUsageRecord } from '../../repo/types.ts';
 import { type exportQuery, type importBody } from '../schemas.ts';
 import { saveUpstreams } from '../shared/save-upstreams.ts';
+import { validateSubscriptionPoolMembers } from '../subscription-pools/validation.ts';
 import { type FullSerializedUpstreamRecord, upstreamRecordToFullJson } from '../upstreams/serialize.ts';
 import type { UpstreamRecord } from '@floway-dev/provider';
 
 interface ExportPayload {
-  version: 20;
+  version: 21;
   exportedAt: string;
   data: {
+    subscriptionPools: SubscriptionPool[];
     users: User[];
     apiKeys: ApiKey[];
     upstreams: FullSerializedUpstreamRecord[];
@@ -37,7 +40,7 @@ interface ExportPayload {
   };
 }
 
-const EXPORT_VERSION = 20;
+const EXPORT_VERSION = 21;
 
 const validateApiKeyIdentities = (records: readonly ApiKey[], existing: readonly ApiKey[], mode: 'merge' | 'replace'): string | null => {
   const ids = new Map<string, number>();
@@ -116,6 +119,7 @@ export const exportData = async (c: CtxWithQuery<typeof exportQuery>) => {
     exportedAt: new Date().toISOString(),
     data: {
       users,
+      subscriptionPools: await repo.subscriptionPools.list(),
       apiKeys,
       upstreams: upstreams.map(upstreamRecordToFullJson),
       proxies: proxies.map(proxy => ({ id: proxy.id, name: proxy.name, url: proxy.url, dial_timeout_seconds: proxy.dialTimeoutSeconds })),
@@ -131,12 +135,33 @@ export const exportData = async (c: CtxWithQuery<typeof exportQuery>) => {
 };
 
 export const importData = async (c: CtxWithJson<typeof importBody>) => {
-  const { mode, data: rawData } = c.req.valid('json');
+  const { mode, version, data: rawData } = c.req.valid('json');
+  if (version === 21 && (rawData === null || typeof rawData !== 'object' || !Object.hasOwn(rawData, 'subscriptionPools'))) {
+    return c.json({ error: 'version 21 requires subscriptionPools configuration' }, 400);
+  }
   const parsed = parseImportData(rawData);
   if (parsed.type === 'invalid') return c.json({ error: parsed.error }, 400);
-  const { users, apiKeys, upstreams, proxies, usage, searchUsage, performance, performanceIncluded, searchConfig } = parsed.data;
+  const { users, apiKeys, upstreams, proxies, usage, searchUsage, performance, performanceIncluded, searchConfig, subscriptionPools } = parsed.data;
 
   const repo = getRepo();
+  const existingPools = mode === 'merge' ? await repo.subscriptionPools.list() : [];
+  const incomingPoolIds = new Set(subscriptionPools.map(pool => pool.id));
+  const prospectivePools = [...existingPools.filter(pool => !incomingPoolIds.has(pool.id)), ...subscriptionPools];
+  const incomingIds = new Set(upstreams.map(upstream => upstream.id));
+  const prospectiveUpstreams = mode === 'merge'
+    ? [...(await repo.upstreams.list()).filter(upstream => !incomingIds.has(upstream.id)), ...upstreams]
+    : upstreams;
+  const poolError = await validateSubscriptionPoolMembers(prospectivePools, prospectiveUpstreams);
+  if (poolError) return c.json({ error: `invalid subscriptionPools: ${poolError}` }, 400);
+  for (const pool of subscriptionPools) {
+    const existing = existingPools.find(item => item.id === pool.id);
+    if (!existing) continue;
+    if (existing.provider !== pool.provider) return c.json({ error: 'Subscription pool provider cannot be changed' }, 400);
+    const removed = existing.upstreamIds.filter(id => !pool.upstreamIds.includes(id));
+    if (removed.length > 0 && (await repo.subscriptionPools.runtime(pool.id, Date.now())).some(account => removed.includes(account.upstreamId) && account.inFlight > 0)) {
+      return c.json({ error: 'Subscription pool has active requests' }, 409);
+    }
+  }
   // Merge mode needs each key's prior dump policy to identify transitions that
   // must disconnect live subscribers after the replacement row is stored.
   const preImportKeys = await repo.apiKeys.listIncludingDeleted();
@@ -149,6 +174,7 @@ export const importData = async (c: CtxWithJson<typeof importBody>) => {
   if (fallbackRefError) return c.json({ error: `invalid upstreams: ${fallbackRefError}` }, 400);
 
   if (mode === 'replace') {
+    await repo.subscriptionPools.deleteAll();
     for (const key of preImportKeys) await notifyDisabledBestEffort(key.id, 'replace-mode import');
 
     // D1 does not expose a transaction spanning these repositories. Complete
@@ -193,6 +219,7 @@ export const importData = async (c: CtxWithJson<typeof importBody>) => {
     previous: await repo.upstreams.getById(next.id),
     next,
   }))));
+  for (const pool of subscriptionPools) await repo.subscriptionPools.save(pool);
   for (const record of performance) await repo.performance.set(record);
   await repo.webSearchConfig.save(searchConfig);
 
@@ -202,6 +229,7 @@ export const importData = async (c: CtxWithJson<typeof importBody>) => {
       users: users.length,
       apiKeys: apiKeys.length,
       upstreams: upstreams.length,
+      subscriptionPools: subscriptionPools.length,
       proxies: proxies.length,
       usage: usage.length,
       searchUsage: searchUsage.length,

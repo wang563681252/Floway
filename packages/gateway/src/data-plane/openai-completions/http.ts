@@ -77,9 +77,9 @@ export const openaiCompletions = async (c: Context): Promise<Response> => {
     model: request.model,
     kind: 'chat',
     modelServesEndpoint: model => model.endpoints.openaiCompletions !== undefined,
-    call: (provider, model, opts) => {
+    call: (provider, model, opts, signal) => {
       serving = { model, upstreamId: provider.upstreamId };
-      return provider.instance.callOpenAICompletions(model, upstreamBody, ctx.abortSignal, opts);
+      return provider.instance.callOpenAICompletions(model, upstreamBody, signal, opts);
     },
     response: wantsStream
       ? { format: 'sse', transformFrame, settleUsage }
