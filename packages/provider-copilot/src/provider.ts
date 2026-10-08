@@ -15,7 +15,7 @@ import { emptyKnownModels, mergeKnownModels, projectKnownModels } from './known-
 import { mergeCopilotVariants } from './merge-variants.ts';
 import { CONTEXT_1M_BETA, copilotModelSupportsFastVariant, type ModelSelectionHints, resolveCopilotRawModel } from './model-selection.ts';
 import { copilotVariantIndex } from './model-variants.ts';
-import { pricingForCopilotPublicModelId } from './pricing.ts';
+import { pricingForCopilotModel } from './pricing.ts';
 import { readCopilotUpstreamState, type CopilotUpstreamState } from './state.ts';
 import type { CopilotRawModel } from './types.ts';
 import { runInterceptors } from '@floway-dev/interceptor';
@@ -41,7 +41,9 @@ const copilotRawToProviderModel = (model: CopilotRawModel): Omit<ProviderModel, 
 
   const partial: Omit<ProviderModel, 'kind' | 'endpoints' | 'providerData' | 'enabledFlags' | 'flagOverrides'> = {
     id: model.id,
+    upstreamModelId: model.id,
     limits,
+    opaqueBlobCompatibilityScope: { bindToUpstream: true },
   };
   if (model.owned_by !== undefined) partial.owned_by = model.owned_by;
   if (model.created !== undefined) partial.created = model.created;
@@ -218,13 +220,17 @@ const finalizeCopilotModels = (
       throw new Error(`Copilot model projection invariant violated: merged model '${mergedModel.id}' has no raw variant group (raw model ids: ${rawIds})`);
     }
     const endpoints = copilotModelEndpoints(variants);
-    const pricing = pricingForCopilotPublicModelId(mergedModel.id);
+    const pricing = pricingForCopilotModel(mergedModel, variants, index);
     const draft: Omit<ProviderModel, 'enabledFlags'> = {
       ...copilotRawToProviderModel(mergedModel),
+      upstreamModelId: mergedModel.id,
       kind: kindForEndpoints(endpoints),
       endpoints,
       providerData: { rawModels: variants } satisfies CopilotProviderData,
       ...(pricing ? { pricing } : {}),
+      ...((mergedModel.owned_by?.toLowerCase() === 'openai' || /^(?:gpt-|o[134](?:-|$)|codex-)/.test(mergedModel.id))
+        ? { opaqueBlobCompatibilityScope: { bindToUpstream: true, key: 'openai' } }
+        : {}),
     };
     // Layer order: provider upstream default → operator upstream override
     // → per-model provider default. Placing the per-model layer last
@@ -353,6 +359,7 @@ export const createCopilotProvider = (record: UpstreamRecord): Provider => {
       const response = await fetchCopilotModels(upstreamConfig, fetcher);
       const now = Date.now();
       const merged = mergeKnownModels(known, response, now);
+      const models = finalizeCopilotModels(projectKnownModels(merged, now), copilot.flagOverrides);
       // The accumulator merges into whatever is stored at write time, not into
       // the snapshot read before the fetch — fetchCopilotModels may have minted
       // a token and written this same row on the way through. Persistence stays
@@ -370,7 +377,7 @@ export const createCopilotProvider = (record: UpstreamRecord): Provider => {
       } catch (err) {
         console.warn(`Failed to persist Copilot known-models for ${copilot.id}:`, err);
       }
-      return finalizeCopilotModels(projectKnownModels(merged, now), copilot.flagOverrides);
+      return models;
     },
     // Copilot's catalog never declares endpoints.openaiCompletions, so this
     // stub is unreachable; the rejection surfaces a routing bug.

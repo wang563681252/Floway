@@ -5,7 +5,6 @@ import type {
   ModelPrefixConfig,
   ProxyFallbackEntry,
   UpstreamModelConfig,
-  UpstreamProviderKind,
 } from '@floway-dev/provider';
 import type { AzureUpstreamConfig as StoredAzureUpstreamConfig } from '@floway-dev/provider-azure';
 import type {
@@ -24,6 +23,8 @@ import type {
   CodexAccountIdentity,
   CodexQuotaSnapshot,
   CodexQuotaSnapshotMap,
+  CodexRateLimitResetCredit,
+  CodexRateLimitResetCredits,
   CodexUpstreamConfig as StoredCodexUpstreamConfig,
   CodexUpstreamState as StoredCodexUpstreamState,
 } from '@floway-dev/provider-codex';
@@ -35,7 +36,6 @@ import type {
 } from '@floway-dev/provider-copilot';
 import type {
   CustomModelsFetch,
-  CustomRawModel,
   CustomUpstreamConfig as StoredCustomUpstreamConfig,
 } from '@floway-dev/provider-custom';
 import type {
@@ -43,7 +43,8 @@ import type {
   OllamaUpstreamState as StoredOllamaUpstreamState,
 } from '@floway-dev/provider-ollama';
 
-export type { ClaudeCodeQuotaWindow, CodexQuotaSnapshot, CodexQuotaSnapshotMap, CustomModelsFetch, CustomRawModel, ProxyFallbackEntry };
+export type { ClaudeCodeQuotaWindow, CodexQuotaSnapshot, CodexQuotaSnapshotMap, CodexRateLimitResetCredit, CodexRateLimitResetCredits, CustomModelsFetch, ProxyFallbackEntry };
+export type { ProviderModelsFailureResponse } from '@floway-dev/provider';
 
 type CustomConfigFields = Pick<
   StoredCustomUpstreamConfig,
@@ -94,7 +95,7 @@ export type CodexAccountCredentialState = Pick<
   'chatgptAccountId' | 'state' | 'state_message' | 'state_updated_at'
 > & {
   accessToken?: CodexAccountCredential['accessToken'];
-  refresh_token?: string;
+  refresh_token?: string | null;
   refresh_token_set?: boolean;
 };
 
@@ -224,7 +225,3 @@ export interface ListedUpstreamModel extends UpstreamModelConfig {
   publicModelId: string;
   endpoints: ModelEndpoints;
 }
-
-export type ListUpstreamModelsResponse =
-  | { kind: 'custom'; data: CustomRawModel[] }
-  | { kind: Exclude<UpstreamProviderKind, 'custom'>; data: ListedUpstreamModel[] };

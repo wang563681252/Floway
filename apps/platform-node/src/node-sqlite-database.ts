@@ -42,8 +42,12 @@ class NodeSqlitePreparedStatement implements SqlPreparedStatement {
   }
 }
 
-class NodeSqliteDatabase implements SqlDatabase {
+class NodeSqliteDatabase implements SqlDatabase, Disposable {
   constructor(private readonly db: DatabaseSync) {}
+
+  [Symbol.dispose](): void {
+    this.db.close();
+  }
 
   prepare(query: string): SqlPreparedStatement {
     return new NodeSqlitePreparedStatement(this.db.prepare(query));
@@ -85,7 +89,7 @@ class NodeSqliteDatabase implements SqlDatabase {
   }
 }
 
-export const createNodeSqliteDatabase = (path: string): SqlDatabase => {
+export const createNodeSqliteDatabase = (path: string): SqlDatabase & Disposable => {
   // node:sqlite throws ERR_SQLITE_ERROR ("unable to open database file") when
   // the parent directory is missing — unhelpful on a fresh deploy. Each
   // component owns its own root.

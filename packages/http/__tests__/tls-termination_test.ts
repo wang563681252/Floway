@@ -114,6 +114,56 @@ describe('userspaceTls — transport EOF without close_notify', () => {
     const parsed = await parseHttpResponse(plaintext);
     expect(await collectBody(parsed)).toBe('hello');
   });
+
+  // The drain that holds a latched truncation behind undelivered plaintext is
+  // the one part of this change that could turn a COMPLETE response into a
+  // failure, and whether it does depends entirely on how record delivery
+  // interleaves with consumer reads. A single hand-picked interleaving proves
+  // little, so sweep the axes that decide the outcome: how finely the response
+  // is split across onApplicationData calls, and whether the consumer is
+  // already parked on a read or lagging behind. Every combination must yield
+  // the whole body.
+  describe('complete response followed by a rude close, across delivery interleavings', () => {
+    const RESPONSE = [
+      'HTTP/1.1 200 OK\r\n',
+      'Transfer-Encoding: chunked\r\n',
+      '\r\n',
+      '5\r\nhello\r\n',
+      '6\r\n world\r\n',
+      '0\r\n\r\n',
+    ].join('');
+
+    const splitEvery = (s: string, size: number): string[] => {
+      const out: string[] = [];
+      for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
+      return out;
+    };
+
+    // 1 exercises the worst case (one record per byte, so the terminating
+    // chunk straddles many deliveries); RESPONSE.length delivers it whole.
+    for (const size of [1, 2, 3, 7, 13, 32, RESPONSE.length]) {
+      for (const eager of [true, false]) {
+        it(`delivers the full body with ${size}-byte records and a ${eager ? 'parked' : 'lagging'} consumer`, async () => {
+          const { fake, plaintext, hooks } = await connect();
+
+          // eager: start reading before any bytes exist, so every delivery
+          // lands on a parked read request.
+          // lagging: let the whole response and the EOF land first, so the
+          // truncation is latched while plaintext is still queued.
+          const body = eager ? parseHttpResponse(plaintext) : null;
+
+          for (const piece of splitEvery(RESPONSE, size)) {
+            hooks.onApplicationData(enc.encode(piece));
+            if (eager) await Promise.resolve();
+          }
+          fake.endResponse();
+
+          const parsed = await (body ?? parseHttpResponse(plaintext));
+          expect(await collectBody(parsed)).toBe('hello world');
+        });
+      }
+    }
+  });
 });
 
 describe('userspaceTls — peer close_notify', () => {

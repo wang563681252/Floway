@@ -4,7 +4,7 @@ import { canonicalPricingSelectorKey, type ModelPricing, type PriceVector, valid
 import { assertUpstreamProviderKind, isRecord, modelsField, pricingField, type UpstreamModelConfig, type UpstreamProviderKind } from '@floway-dev/provider';
 import { pricingForClaudeCodeModelKey } from '@floway-dev/provider-claude-code';
 import { pricingForCodexModelKey } from '@floway-dev/provider-codex';
-import { pricingForCopilotPublicModelId } from '@floway-dev/provider-copilot';
+import { copilotModelHasRawModelKey } from '@floway-dev/provider-copilot';
 import { pricingForOllamaModelKey } from '@floway-dev/provider-ollama';
 
 const CATALOG_HARD_TTL_MS = 24 * 60 * 60 * 1000;
@@ -52,28 +52,43 @@ const staticResolution = (pricing: ModelPricing | null, source: string): Pricing
     ? { status: 'unpriced', source, guardsModelsCache: false }
     : { status: 'priced', pricing, source, guardsModelsCache: false };
 
-const customCacheResolution = (
+const catalogModelMatches = (
+  candidate: Record<string, unknown>,
+  provider: 'custom' | 'copilot',
+  model: string,
+  modelKey: string,
+): boolean => {
+  if (provider === 'custom') return candidate.id === model && candidate.providerData === modelKey;
+  return copilotModelHasRawModelKey(candidate.providerData, modelKey);
+};
+
+const catalogResolution = (
   upstream: StoredUpstream,
+  provider: 'custom' | 'copilot',
   model: string,
   modelKey: string,
   now: number,
 ): PricingResolution => {
   if (upstream.modelsCacheJson === null) {
-    return { status: 'unavailable', reason: `Custom upstream ${upstream.id} has no stored model catalog` };
+    return { status: 'unavailable', reason: `${provider} upstream ${upstream.id} has no stored model catalog` };
   }
   const cache = parsedJson(upstream.modelsCacheJson, `Upstream ${upstream.id} models_cache_json`);
   if (!isRecord(cache) || cache.revision !== MODEL_CATALOG_REVISION || typeof cache.fetchedAt !== 'number' || !Array.isArray(cache.models)) {
-    return { status: 'unavailable', reason: `Custom upstream ${upstream.id} has no current stored model catalog` };
+    return { status: 'unavailable', reason: `${provider} upstream ${upstream.id} has no current stored model catalog` };
   }
   if (!Number.isFinite(cache.fetchedAt) || now - cache.fetchedAt >= CATALOG_HARD_TTL_MS) {
-    return { status: 'unavailable', reason: `Custom upstream ${upstream.id} model catalog is older than 24 hours` };
+    return { status: 'unavailable', reason: `${provider} upstream ${upstream.id} model catalog is older than 24 hours` };
   }
-  const cached = cache.models.find(candidate =>
-    isRecord(candidate) && candidate.id === model && candidate.providerData === modelKey);
+  const matches = cache.models.filter(candidate =>
+    isRecord(candidate) && catalogModelMatches(candidate, provider, model, modelKey));
+  if (matches.length > 1) {
+    throw new ToolError('catalog-ambiguity', `Upstream ${upstream.id} catalog contains multiple models for ${model} (${modelKey})`, 1);
+  }
+  const [cached] = matches;
   if (!isRecord(cached)) {
-    return { status: 'unavailable', reason: `Custom upstream ${upstream.id} catalog does not contain ${model} (${modelKey})` };
+    return { status: 'unavailable', reason: `${provider} upstream ${upstream.id} catalog does not contain ${model} (${modelKey})` };
   }
-  const pricing = pricingField(cached.pricing, `custom upstream ${upstream.id} cached model ${model}.pricing`);
+  const pricing = pricingField(cached.pricing, `${provider} upstream ${upstream.id} cached model ${model}.pricing`);
   return pricing === undefined
     ? { status: 'unpriced', source: `upstream:${upstream.id}:models-cache`, guardsModelsCache: true }
     : { status: 'priced', pricing, source: `upstream:${upstream.id}:models-cache`, guardsModelsCache: true };
@@ -97,12 +112,12 @@ export const resolveUsagePricing = (
         ? { status: 'unavailable', reason: `Custom config no longer contains model key ${identity.modelKey}` }
         : { status: 'unpriced', source: `upstream:${upstream.id}:config`, guardsModelsCache: false };
     }
-    return customCacheResolution(upstream, identity.model, identity.modelKey, now);
+    return catalogResolution(upstream, provider, identity.model, identity.modelKey, now);
   case 'ollama':
     if (manual?.pricing !== undefined) return staticResolution(manual.pricing, `upstream:${upstream.id}:config`);
     return staticResolution(pricingForOllamaModelKey(identity.modelKey), 'provider:ollama');
   case 'copilot':
-    return staticResolution(pricingForCopilotPublicModelId(identity.model), 'provider:copilot');
+    return catalogResolution(upstream, provider, identity.model, identity.modelKey, now);
   case 'codex':
     return staticResolution(pricingForCodexModelKey(identity.modelKey), 'provider:codex');
   case 'claude-code':

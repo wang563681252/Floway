@@ -17,7 +17,7 @@ const POLICY: ImageCachePolicy = {
 const withCache = async (fn: (cache: SqliteImageCacheStore, db: ReturnType<typeof createNodeSqliteDatabase>) => Promise<void>): Promise<void> => {
   const dir = await mkdtemp(join(tmpdir(), 'sqlite-image-cache-store-'));
   try {
-    const db = createNodeSqliteDatabase(join(dir, 'test.db'));
+    using db = createNodeSqliteDatabase(join(dir, 'test.db'));
     await db.exec(
       'CREATE TABLE image_cache ('
       + '  key TEXT PRIMARY KEY,'

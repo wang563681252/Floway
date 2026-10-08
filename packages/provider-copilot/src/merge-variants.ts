@@ -11,6 +11,9 @@
 //   capabilities.limits.max_*_tokens                        -> max across siblings
 //   capabilities.supports.reasoning_effort                  -> union (consumed by
 //                                                             the raw selector)
+//   billing                                                 -> base snapshot;
+//                                                             pricing projects
+//                                                             every raw lane
 //   everything else                                         -> identical across
 //                                                             siblings, taken
 //                                                             from base

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { test } from 'vitest';
+import { expect, test } from 'vitest';
 
 import { createNodeSqliteDatabase } from '../src/node-sqlite-database.ts';
 import { assert, assertEquals, assertRejects } from '@floway-dev/test-utils';
@@ -17,7 +17,7 @@ const withTempDb = async (fn: (dbPath: string) => Promise<void>): Promise<void> 
 };
 
 test('prepare/all returns rows in SqlResult envelope', () => withTempDb(async path => {
-  const db = createNodeSqliteDatabase(path);
+  using db = createNodeSqliteDatabase(path);
   await db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)').run();
   await db.prepare('INSERT INTO t (id, name) VALUES (?, ?)').bind(1, 'a').run();
   await db.prepare('INSERT INTO t (id, name) VALUES (?, ?)').bind(2, 'b').run();
@@ -28,7 +28,7 @@ test('prepare/all returns rows in SqlResult envelope', () => withTempDb(async pa
 }));
 
 test('first returns first row or null', () => withTempDb(async path => {
-  const db = createNodeSqliteDatabase(path);
+  using db = createNodeSqliteDatabase(path);
   await db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)').run();
   await db.prepare('INSERT INTO t (id, name) VALUES (?, ?)').bind(7, 'seven').run();
 
@@ -40,7 +40,7 @@ test('first returns first row or null', () => withTempDb(async path => {
 }));
 
 test('run reports changes for INSERT / UPDATE / DELETE', () => withTempDb(async path => {
-  const db = createNodeSqliteDatabase(path);
+  using db = createNodeSqliteDatabase(path);
   await db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)').run();
 
   const ins = await db.prepare('INSERT INTO t (id, name) VALUES (?, ?), (?, ?)').bind(1, 'a', 2, 'b').run();
@@ -54,7 +54,7 @@ test('run reports changes for INSERT / UPDATE / DELETE', () => withTempDb(async 
 }));
 
 test('batch executes statements in order and returns each result', () => withTempDb(async path => {
-  const db = createNodeSqliteDatabase(path);
+  using db = createNodeSqliteDatabase(path);
   assert(db.batch !== undefined, 'batch must be implemented');
   await db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)').run();
 
@@ -71,7 +71,7 @@ test('batch executes statements in order and returns each result', () => withTem
 }));
 
 test('batch rolls back on mid-batch failure', () => withTempDb(async path => {
-  const db = createNodeSqliteDatabase(path);
+  using db = createNodeSqliteDatabase(path);
   await db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)').run();
   await db.prepare('INSERT INTO t (id, name) VALUES (?, ?)').bind(1, 'a').run();
 
@@ -92,7 +92,7 @@ test('concurrent batch calls do not interleave transactions', () => withTempDb(a
   // Regression: an `await` between BEGIN and COMMIT used to yield a microtask,
   // letting a second batch call's BEGIN run while the first transaction was
   // still open and trip "cannot start a transaction within a transaction".
-  const db = createNodeSqliteDatabase(path);
+  using db = createNodeSqliteDatabase(path);
   await db.prepare('CREATE TABLE t (id INTEGER PRIMARY KEY)').run();
 
   await Promise.all([
@@ -105,7 +105,7 @@ test('concurrent batch calls do not interleave transactions', () => withTempDb(a
 }));
 
 test('foreign key enforcement is on', () => withTempDb(async path => {
-  const db = createNodeSqliteDatabase(path);
+  using db = createNodeSqliteDatabase(path);
   await db.prepare('CREATE TABLE parent (id INTEGER PRIMARY KEY)').run();
   await db.prepare('CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id))').run();
 
@@ -113,3 +113,12 @@ test('foreign key enforcement is on', () => withTempDb(async path => {
     () => db.prepare('INSERT INTO child (id, parent_id) VALUES (?, ?)').bind(1, 999).run(),
   );
 }));
+
+test('scoped disposal releases the database without masking an operation failure', async () => {
+  const failure = new Error('operation failed before cleanup');
+  await expect(withTempDb(async path => {
+    using db = createNodeSqliteDatabase(path);
+    await db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+    throw failure;
+  })).rejects.toBe(failure);
+});

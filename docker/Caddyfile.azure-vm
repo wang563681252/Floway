@@ -1,0 +1,20 @@
+{
+	# Only TCP is published; do not advertise an unreachable HTTP/3 endpoint.
+	# https://caddyserver.com/docs/caddyfile/options#protocols
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$FLOWAY_DOMAIN} {
+	reverse_proxy server:8788 {
+		# A positive interval preserves cancellation when a client disconnects.
+		# SSE is flushed immediately; WebSocket upgrades are handled automatically.
+		# https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming
+		flush_interval 10ms
+	}
+}
+
+http:// {
+	redir https://{$FLOWAY_DOMAIN}{uri} 308
+}

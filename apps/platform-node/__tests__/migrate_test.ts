@@ -18,7 +18,7 @@ const withTemp = async (fn: (dir: string) => Promise<void>): Promise<void> => {
 };
 
 test('applies all real migration files against a fresh sqlite', () => withTemp(async dir => {
-  const db = createNodeSqliteDatabase(join(dir, 'real.db'));
+  using db = createNodeSqliteDatabase(join(dir, 'real.db'));
   await applyMigrations(db);
 
   // Schema check: a stable table from migration 0001 exists with expected columns.
@@ -27,6 +27,12 @@ test('applies all real migration files against a fresh sqlite', () => withTemp(a
   assertEquals(colNames.includes('id'), true);
   assertEquals(colNames.includes('key'), true);
   assertEquals(colNames.includes('server_secret'), true);
+  const dumpColumns = await db.prepare('PRAGMA table_info(dump_records)').all<{ name: string }>();
+  const upstreamColumns = await db.prepare('PRAGMA table_info(upstreams)').all<{ name: string }>();
+  assertEquals(dumpColumns.results.some(column => column.name === 'response_upstream_body_descriptor'), true);
+  assertEquals(upstreamColumns.results.some(column => column.name === 'config_version'), true);
+  const latest = await db.prepare('SELECT name FROM _migrations ORDER BY name DESC LIMIT 2').all<{ name: string }>();
+  assertEquals(latest.results.map(row => row.name), ['0085_upstream_config_version.sql', '0084_dump_upstream_body.sql']);
 
   // Every migration was recorded.
   const recorded = await db.prepare('SELECT COUNT(*) AS n FROM _migrations').first<{ n: number }>();
@@ -34,7 +40,7 @@ test('applies all real migration files against a fresh sqlite', () => withTemp(a
 }));
 
 test('rerun is a no-op once all migrations are applied', () => withTemp(async dir => {
-  const db = createNodeSqliteDatabase(join(dir, 'idempotent.db'));
+  using db = createNodeSqliteDatabase(join(dir, 'idempotent.db'));
   await applyMigrations(db);
   const firstCount = await db.prepare('SELECT COUNT(*) AS n FROM _migrations').first<{ n: number }>();
 
@@ -57,7 +63,7 @@ test('mid-migration failure rolls back and leaves no partial schema', () => with
     + 'NOT VALID SQL HERE;\n',
   );
 
-  const db = createNodeSqliteDatabase(join(dir, 'rollback.db'));
+  using db = createNodeSqliteDatabase(join(dir, 'rollback.db'));
   await assertRejects(() => applyMigrations(db, migrationsDir));
 
   const tables = await db.prepare(
@@ -76,7 +82,7 @@ test('skips already-applied migrations on partial state', () => withTemp(async d
   await writeFile(join(migrationsDir, '0001_a.sql'), 'CREATE TABLE a (id INTEGER);');
   await writeFile(join(migrationsDir, '0002_b.sql'), 'CREATE TABLE b (id INTEGER);');
 
-  const db = createNodeSqliteDatabase(join(dir, 'partial.db'));
+  using db = createNodeSqliteDatabase(join(dir, 'partial.db'));
   await applyMigrations(db, migrationsDir);
 
   // Add a third migration; rerun. Only the new one should execute — the first

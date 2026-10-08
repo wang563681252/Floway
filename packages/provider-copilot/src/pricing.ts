@@ -1,164 +1,137 @@
-// Per-public-model pricing table used by the Copilot provider. Keys target
-// the public model id that survives Claude variant merging (e.g.
-// `claude-opus-4-7`, `gpt-5.4`). Every entry carries explicit
-// USD-per-million-token rates for its selector coordinate.
-//
-// Source of truth for Copilot pricing updates:
+import type { CopilotVariantIndex } from './model-variants.ts';
+import type { CopilotRawModel } from './types.ts';
+import {
+  BILLING_METRICS,
+  canonicalPricingSelectorKey,
+  decimalStringIsZero,
+  divideDecimalString,
+  modelPricing,
+  multiplyDecimalStrings,
+  parseNonNegativeDecimalString,
+  pricingEntry,
+  type BillingMetric,
+  type ModelPricing,
+  type PriceVector,
+  type PricingEntry,
+} from '@floway-dev/protocols/common';
+import { isRecord } from '@floway-dev/provider';
+
+// Copilot publishes AI credits, not USD. One credit is USD 0.01.
 // https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
-// After changing this table, run the unit-price backfill for existing rows.
-// Refresh procedure: .agents/skills/fetching-models-pricing/.
-import { modelPricing, tokenBasePricing, tokenPricingEntry, type ModelPricing } from '@floway-dev/protocols/common';
+const USD_PER_AI_CREDIT = '0.01';
 
-type PricingRule = readonly [key: string | RegExp, pricing: ModelPricing];
+// The denominator belongs to token_prices. Older catalogs omit it.
+// https://github.com/microsoft/vscode/blob/675354c07e19f3d7ff0b09d00bcc816dad233825/src/vs/platform/agentHost/common/meta/vscode/agentModelPricing.ts#L119
+const DEFAULT_BATCH_SIZE = 1_000_000;
 
-const COPILOT_MODEL_PRICING: readonly PricingRule[] = [
-  ['claude-opus-4-5', tokenBasePricing({ input_tokens: '5', input_cache_read_tokens: '0.5', input_cache_write_tokens: '6.25', output_tokens: '25' })],
-  // Anthropic public Fast Mode pricing is 6× base for Opus 4.6 / 4.7.
-  // https://docs.claude.com/en/build-with-claude/fast-mode
-  [/^claude-opus-4-[67]$/, modelPricing(
-    tokenPricingEntry({ input_tokens: '5', input_cache_read_tokens: '0.5', input_cache_write_tokens: '6.25', output_tokens: '25' }),
-    tokenPricingEntry({ input_tokens: '30', input_cache_read_tokens: '3', input_cache_write_tokens: '37.5', output_tokens: '150' }, { serviceTier: 'fast' }),
-  )],
-  ['claude-opus-4-8', modelPricing(
-    tokenPricingEntry({ input_tokens: '5', input_cache_read_tokens: '0.5', input_cache_write_tokens: '6.25', output_tokens: '25' }),
-    tokenPricingEntry({ input_tokens: '10', input_cache_read_tokens: '1', input_cache_write_tokens: '12.5', output_tokens: '50' }, { serviceTier: 'fast' }),
-  )],
-  // Opus 5 lists at Opus 4.8 rates; Copilot bills it at provider API list price.
-  // https://github.blog/changelog/2026-07-24-claude-opus-5-is-now-available-in-github-copilot/
-  ['claude-opus-5', modelPricing(
-    tokenPricingEntry({ input_tokens: '5', input_cache_read_tokens: '0.5', input_cache_write_tokens: '6.25', output_tokens: '25' }),
-    tokenPricingEntry({ input_tokens: '10', input_cache_read_tokens: '1', input_cache_write_tokens: '12.5', output_tokens: '50' }, { serviceTier: 'fast' }),
-  )],
-  ['claude-sonnet-5', tokenBasePricing({ input_tokens: '2', input_cache_read_tokens: '0.2', input_cache_write_tokens: '2.5', output_tokens: '10' })],
-  [/^claude-sonnet-4(-[56])?$/, tokenBasePricing({ input_tokens: '3', input_cache_read_tokens: '0.3', input_cache_write_tokens: '3.75', output_tokens: '15' })],
-  ['claude-haiku-4-5', tokenBasePricing({ input_tokens: '1', input_cache_read_tokens: '0.1', input_cache_write_tokens: '1.25', output_tokens: '5' })],
-  // GPT-5.6 Sol, and the lane Copilot publishes as the separate raw variant
-  // `gpt-5.6-sol-fast` and this table reaches through the merged public id.
-  // Rates are OpenAI's published ones for the tier each lane is served at, in
-  // keeping with the rest of this table: it records what the same request
-  // would have cost at the vendor, not what GitHub charges for it — `gpt-4.1`
-  // is quoted here at OpenAI's $2/$0.50/$8 while Copilot serves it for zero.
-  //
-  // Which lane is which comes from Copilot's own catalog, which quotes models
-  // in credits per million tokens (microsoft/vscode names the unit in
-  // `agentModelPricing.ts`). Sol is quoted at 200/20/250/1000 and the `-fast`
-  // variant at exactly double, and the variant's response reports
-  // `service_tier: "priority"` — so the suffixed id is Sol's accelerated
-  // lane, which OpenAI sells as Fast mode, and not a second model.
-  // https://platform.openai.com/docs/pricing
-  // https://github.com/sst/models.dev/blob/0b2318a699fb140b7e568228e05d3212c9f095dc/providers/openai/models/gpt-5.6-sol.toml
-  ['gpt-5.6-sol', modelPricing(
-    tokenPricingEntry({ input_tokens: '4', input_cache_read_tokens: '0.4', input_cache_write_tokens: '5', output_tokens: '20' }),
-    tokenPricingEntry({ input_tokens: '8', input_cache_read_tokens: '0.8', input_cache_write_tokens: '10', output_tokens: '30' }, { inputTokens: { operator: 'gt', value: 272000 } }),
-    tokenPricingEntry({ input_tokens: '8', input_cache_read_tokens: '0.8', input_cache_write_tokens: '10', output_tokens: '40' }, { serviceTier: 'priority' }),
-    tokenPricingEntry({ input_tokens: '16', input_cache_read_tokens: '1.6', input_cache_write_tokens: '20', output_tokens: '60' }, { serviceTier: 'priority', inputTokens: { operator: 'gt', value: 272000 } }),
-  )],
-  // Terra and Luna at OpenAI's current standard rates; the values they
-  // replace were the launch card OpenAI has since cut, Luna's by a factor of
-  // five. Neither publishes a `-fast` sibling in Copilot's catalog, so
-  // neither has an accelerated lane to price. Luna is also the one place
-  // where Copilot and OpenAI disagree on the long-context boundary rather
-  // than the rate — Copilot caps Luna's default band at 200k where OpenAI's
-  // card steps every GPT-5.6 model at 272k — and the threshold here follows
-  // the rate card it prices against.
-  // https://platform.openai.com/docs/pricing
-  // https://github.com/sst/models.dev/blob/9b6e58f1e296f12af4d06a04bb216dcf73baba5a/providers/openai/models/gpt-5.6-terra.toml
-  ['gpt-5.6-terra', modelPricing(
-    tokenPricingEntry({ input_tokens: '2', input_cache_read_tokens: '0.2', input_cache_write_tokens: '2.5', output_tokens: '12' }),
-    tokenPricingEntry({ input_tokens: '4', input_cache_read_tokens: '0.4', input_cache_write_tokens: '5', output_tokens: '18' }, { inputTokens: { operator: 'gt', value: 272000 } }),
-  )],
-  ['gpt-5.6-luna', modelPricing(
-    tokenPricingEntry({ input_tokens: '0.2', input_cache_read_tokens: '0.02', input_cache_write_tokens: '0.25', output_tokens: '1.2' }),
-    tokenPricingEntry({ input_tokens: '0.4', input_cache_read_tokens: '0.04', input_cache_write_tokens: '0.5', output_tokens: '1.8' }, { inputTokens: { operator: 'gt', value: 272000 } }),
-  )],
-  // Copilot's live catalog exposes a 1.05M context window for GPT-5.5/5.4;
-  // OpenAI reprices the whole request above 272k input tokens.
-  // https://web.archive.org/web/20260709205359/https://platform.openai.com/docs/pricing
-  ['gpt-5.5', modelPricing(
-    tokenPricingEntry({ input_tokens: '5', input_cache_read_tokens: '0.5', output_tokens: '30' }),
-    tokenPricingEntry({ input_tokens: '10', input_cache_read_tokens: '1', output_tokens: '45' }, { inputTokens: { operator: 'gt', value: 272000 } }),
-  )],
-  ['gpt-5.4', modelPricing(
-    tokenPricingEntry({ input_tokens: '2.5', input_cache_read_tokens: '0.25', output_tokens: '15' }),
-    tokenPricingEntry({ input_tokens: '5', input_cache_read_tokens: '0.5', output_tokens: '22.5' }, { inputTokens: { operator: 'gt', value: 272000 } }),
-  )],
-  ['gpt-5.4-mini', tokenBasePricing({ input_tokens: '0.75', input_cache_read_tokens: '0.075', output_tokens: '4.5' })],
-  ['gpt-5.4-nano', tokenBasePricing({ input_tokens: '0.2', input_cache_read_tokens: '0.02', output_tokens: '1.25' })],
-  [/^gpt-5[.][23](-codex)?$/, tokenBasePricing({ input_tokens: '1.75', input_cache_read_tokens: '0.175', output_tokens: '14' })],
-  ['gpt-5.1-codex-mini', tokenBasePricing({ input_tokens: '0.25', input_cache_read_tokens: '0.025', output_tokens: '2' })],
-  [/^gpt-5[.]1/, tokenBasePricing({ input_tokens: '1.25', input_cache_read_tokens: '0.125', output_tokens: '10' })],
-  ['gpt-5-mini', tokenBasePricing({ input_tokens: '0.25', input_cache_read_tokens: '0.025', output_tokens: '2' })],
-  [/^gpt-4[.]1/, tokenBasePricing({ input_tokens: '2', input_cache_read_tokens: '0.5', output_tokens: '8' })],
-  ['gpt-41-copilot', tokenBasePricing({ input_tokens: '2', input_cache_read_tokens: '0.5', output_tokens: '8' })],
-  [/^gpt-4o(-[0-9]{4}-[0-9]{2}-[0-9]{2})?$/, tokenBasePricing({ input_tokens: '2.5', input_cache_read_tokens: '1.25', output_tokens: '10' })],
-  ['gpt-4-o-preview', tokenBasePricing({ input_tokens: '2.5', input_cache_read_tokens: '1.25', output_tokens: '10' })],
-  [/^gpt-4o-mini/, tokenBasePricing({ input_tokens: '0.15', input_cache_read_tokens: '0.075', output_tokens: '0.6' })],
-  [/^gpt-4(-0613)?$/, tokenBasePricing({ input_tokens: '30', output_tokens: '60' })],
-  ['gpt-4-0125-preview', tokenBasePricing({ input_tokens: '10', output_tokens: '30' })],
-  ['gpt-3.5-turbo', tokenBasePricing({ input_tokens: '0.5', output_tokens: '1.5' })],
-  ['gpt-3.5-turbo-0613', tokenBasePricing({ input_tokens: '1.5', output_tokens: '2' })],
-  // Google charges higher whole-request rates above 200k input tokens.
-  // https://ai.google.dev/gemini-api/docs/pricing
-  // https://github.com/sst/models.dev/blob/6dfc39c81b6cd57a91c155aa7b4f68ed1b360da0/providers/google/models/gemini-3.1-pro-preview.toml
-  ['gemini-2.5-pro', tokenBasePricing({ input_tokens: '1.25', input_cache_read_tokens: '0.125', output_tokens: '10' })],
-  ['gemini-3-flash-preview', tokenBasePricing({ input_tokens: '0.5', input_cache_read_tokens: '0.05', output_tokens: '3' })],
-  ['gemini-3.1-pro-preview', modelPricing(
-    tokenPricingEntry({ input_tokens: '2', input_cache_read_tokens: '0.2', output_tokens: '12' }),
-    tokenPricingEntry({ input_tokens: '4', input_cache_read_tokens: '0.4', output_tokens: '18' }, { inputTokens: { operator: 'gt', value: 200000 } }),
-  )],
-  ['gemini-3.5-flash', tokenBasePricing({ input_tokens: '1.5', input_cache_read_tokens: '0.15', output_tokens: '9' })],
-  // Gemini 3.6 and 3.7 Flash share one promotional rate card, halved from the
-  // standard $1.50/$0.15/$7.50 through 2026-12-31 and reverting on
-  // 2027-01-01 — recheck these two after that date. Both are among the
-  // Gemini 3 models Google excludes from the >200k tier: the Vertex table
-  // lists identical rates in both columns, and Copilot's catalog quotes one
-  // band whose `long_context` repeats the default.
-  // https://ai.google.dev/gemini-api/docs/pricing
-  // https://cloud.google.com/vertex-ai/generative-ai/pricing
-  [/^gemini-3\.[67]-flash$/, tokenBasePricing({ input_tokens: '0.75', input_cache_read_tokens: '0.075', output_tokens: '3.75' })],
-  // xAI reprices the whole request at 2× once the prompt reaches 200k tokens.
-  // Cached-read is xAI's own published $0.30/$0.60; Copilot's catalog and
-  // LiteLLM both carry $0.50/$1.00 for that metric, which the vendor contradicts.
-  // https://web.archive.org/web/20260801110442/https://docs.x.ai/developers/pricing
-  ['grok-4.5', modelPricing(
-    tokenPricingEntry({ input_tokens: '2', input_cache_read_tokens: '0.3', output_tokens: '6' }),
-    tokenPricingEntry({ input_tokens: '4', input_cache_read_tokens: '0.6', output_tokens: '12' }, { inputTokens: { operator: 'gte', value: 200000 } }),
-  )],
-  // Grok 4.6 keeps 4.5's input and output rates and charges more for cached
-  // reads. Here xAI, Copilot's catalog and models.dev all publish the same
-  // $0.50/$1.00, so this entry carries no counterpart to the cached-read
-  // conflict recorded on 4.5 above.
-  ['grok-4.6', modelPricing(
-    tokenPricingEntry({ input_tokens: '2', input_cache_read_tokens: '0.5', output_tokens: '6' }),
-    tokenPricingEntry({ input_tokens: '4', input_cache_read_tokens: '1', output_tokens: '12' }, { inputTokens: { operator: 'gte', value: 200000 } }),
-  )],
-  [/^grok-code-fast/, tokenBasePricing({ input_tokens: '0.2', output_tokens: '1.5' })],
-  ['goldeneye', tokenBasePricing({ input_tokens: '1.25', input_cache_read_tokens: '0.125', output_tokens: '10' })],
-  ['raptor-mini', tokenBasePricing({ input_tokens: '0.25', input_cache_read_tokens: '0.025', output_tokens: '2' })],
-  ['minimax-m2.5', tokenBasePricing({ input_tokens: '0.3', output_tokens: '1.2' })],
-  // Microsoft sells no MAI-Code API, so Copilot's own catalog quote is the
-  // only rate surface either of these has; the 1-Flash entry below already
-  // reflects it. Unlike its predecessor, 1.1-Flash quotes a cache-write rate.
-  // https://github.com/microsoft/vscode/blob/5582533430f001c356c9eb45d2de5faae08e7481/src/vs/platform/agentHost/common/agentModelPricing.ts
-  ['mai-code-1.1-flash', tokenBasePricing({ input_tokens: '0.2', input_cache_read_tokens: '0.02', input_cache_write_tokens: '0.25', output_tokens: '1.2' })],
-  [/^mai-code-1-flash/, tokenBasePricing({ input_tokens: '0.75', input_cache_read_tokens: '0.075', output_tokens: '4.5' })],
-  [/^text-embedding-3-small/, tokenBasePricing({ input_tokens: '0.02', output_tokens: '0' })],
-  ['text-embedding-ada-002', tokenBasePricing({ input_tokens: '0.1', output_tokens: '0' })],
-  // No rule for `trajectory-compaction`, and none is coming: Copilot quotes
-  // its internal compaction helper at zero, but this table records vendor
-  // rates rather than Copilot's charges — the same reason `gpt-4.1` above
-  // carries OpenAI's price and not the zero Copilot bills for it — and no
-  // vendor sells that model.
-];
+const RATE_FIELDS = [
+  ['input_price', 'input_tokens'],
+  ['cache_write_price', 'input_cache_write_tokens'],
+  ['output_price', 'output_tokens'],
+] as const satisfies readonly (readonly [string, BillingMetric])[];
 
-const matchPricing = (publicName: string): ModelPricing | null => {
-  for (const [key, pricing] of COPILOT_MODEL_PRICING) {
-    if (typeof key === 'string' ? publicName === key : key.test(publicName)) {
-      return pricing;
-    }
-  }
-  return null;
+const recordField = (value: unknown, label: string): Record<string, unknown> => {
+  if (!isRecord(value)) throw new TypeError(`${label} must be an object`);
+  return value;
 };
 
-// Lookup by post-variant-merge public id (e.g. `claude-opus-4-7`).
-export const pricingForCopilotPublicModelId = (publicName: string): ModelPricing | null => matchPricing(publicName);
+const creditPrice = (value: unknown, label: string): string => {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError(`${label} must be a finite non-negative price`);
+    return parseNonNegativeDecimalString(String(value), label);
+  }
+  return parseNonNegativeDecimalString(value, label);
+};
+
+const priceBand = (band: Record<string, unknown>, batchSize: number, label: string): PriceVector => {
+  const prices: PriceVector = {};
+  for (const [field, metric] of RATE_FIELDS) {
+    if (band[field] !== undefined) prices[metric] = creditPrice(band[field], `${label}.${field}`);
+  }
+  const cachePrice = band.cache_read_price !== undefined ? band.cache_read_price : band.cache_price;
+  if (cachePrice !== undefined) {
+    prices.input_cache_read_tokens = creditPrice(cachePrice, `${label}.cache_read_price`);
+  }
+  if (band.cache_read_price !== undefined && band.cache_price !== undefined) {
+    if (creditPrice(band.cache_price, `${label}.cache_price`) !== prices.input_cache_read_tokens) {
+      throw new TypeError(`${label} has conflicting cache-read prices`);
+    }
+  }
+  const metrics = BILLING_METRICS.filter(metric => prices[metric] !== undefined);
+  if (metrics.length === 0) throw new TypeError(`${label} must contain at least one token price`);
+
+  // Free catalog entries explicitly carry batch_size=0 and zero rates.
+  // A zero denominator never makes an absent or positive price free.
+  if (batchSize === 0) {
+    if (metrics.some(metric => !decimalStringIsZero(prices[metric]!))) {
+      throw new RangeError(`${label} has a non-zero price with a zero batch_size`);
+    }
+    return prices;
+  }
+  const rates: PriceVector = {};
+  for (const metric of metrics) {
+    rates[metric] = divideDecimalString(multiplyDecimalStrings(prices[metric]!, USD_PER_AI_CREDIT), String(batchSize));
+  }
+  return rates;
+};
+
+const rawPricingEntries = (model: CopilotRawModel): readonly PricingEntry[] | null => {
+  const label = `Copilot model ${model.id}.billing`;
+  if (model.billing === undefined) return null;
+  const billing = recordField(model.billing, label);
+  if (billing.token_prices === undefined) return null;
+  const prices = recordField(billing.token_prices, `${label}.token_prices`);
+  const batchSize = prices.batch_size === undefined ? DEFAULT_BATCH_SIZE : prices.batch_size;
+  if (typeof batchSize !== 'number' || !Number.isSafeInteger(batchSize) || batchSize < 0) {
+    throw new RangeError(`${label}.token_prices.batch_size must be a non-negative safe integer`);
+  }
+  const base = recordField(prices.default, `${label}.token_prices.default`);
+  const entries = [pricingEntry(priceBand(base, batchSize, `${label}.token_prices.default`))];
+  if (prices.long_context !== undefined) {
+    const long = recordField(prices.long_context, `${label}.token_prices.long_context`);
+    // The default band's upper bound starts the long-context price, not the
+    // long band's cap or the model's context-window capability.
+    // https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
+    const boundary = base.max_prompt_tokens !== undefined ? base.max_prompt_tokens : base.context_max;
+    if (typeof boundary !== 'number' || !Number.isSafeInteger(boundary) || boundary <= 0) {
+      throw new RangeError(`${label}.token_prices.default must publish a positive long-context boundary`);
+    }
+    entries.push(pricingEntry(priceBand(long, batchSize, `${label}.token_prices.long_context`), {
+      inputTokens: { operator: 'gt', value: boundary },
+    }));
+  }
+  return entries;
+};
+
+export const pricingForCopilotModel = (
+  model: CopilotRawModel,
+  variants: readonly CopilotRawModel[],
+  index: CopilotVariantIndex,
+): ModelPricing | null => {
+  const base = rawPricingEntries(model);
+  const variantPricing = variants.map(raw => ({ raw, entries: rawPricingEntries(raw) }));
+  if (base === null || variantPricing.some(variant => variant.entries === null)) return null;
+
+  const entriesBySelector = new Map<string, PricingEntry>();
+  const add = (entry: PricingEntry): void => {
+    const key = canonicalPricingSelectorKey(entry.selector);
+    const previous = entriesBySelector.get(key);
+    if (previous && BILLING_METRICS.some(metric => previous.rates[metric] !== entry.rates[metric])) {
+      throw new TypeError(`Copilot model ${model.id} has conflicting variant prices for selector ${key}`);
+    }
+    entriesBySelector.set(key, entry);
+  };
+  for (const entry of base) add(entry);
+  for (const variant of variantPricing) {
+    // Raw accelerated lanes use the same tier spelling as their served usage.
+    // https://developers.openai.com/api/docs/guides/priority-processing
+    // https://docs.claude.com/en/build-with-claude/fast-mode
+    const serviceTier = index.suffixOf(variant.raw.id) === 'fast'
+      ? model.id.startsWith('claude-') ? 'fast' : 'priority'
+      : undefined;
+    for (const entry of variant.entries!) {
+      add(serviceTier === undefined ? entry : pricingEntry(entry.rates, { ...entry.selector, serviceTier }));
+    }
+  }
+  return modelPricing(...entriesBySelector.values());
+};

@@ -150,6 +150,29 @@ function Invoke-SetupCodexAppServerBatchWrite {
   return $result
 }
 
+function Get-SetupCodexAuth {
+  param([bool]$RunningOnWindows, [string]$NodeExe)
+  if ($RunningOnWindows) {
+    # Reuse an installed Node runtime instead of paying PowerShell startup on
+    # every token lookup. The token stays in the same protected file.
+    # https://nodejs.org/api/fs.html#fsreadfilesyncpath-options
+    if (-not [string]::IsNullOrWhiteSpace($NodeExe)) {
+      return [ordered]@{
+        command = $NodeExe
+        args = @('-e', 'const p=require(''path'');const h=process.env.CODEX_HOME||p.join(require(''os'').homedir(),''.codex'');process.stdout.write(require(''fs'').readFileSync(p.join(h,''floway-token''),''utf8''));')
+      }
+    }
+    return [ordered]@{
+      command = 'powershell'
+      args = @('-NoProfile', '-NonInteractive', '-Command', '$h = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ''.codex'' }; [IO.File]::ReadAllText((Join-Path $h ''floway-token''))')
+    }
+  }
+  return [ordered]@{
+    command = 'sh'
+    args = @('-c', 'cat "${CODEX_HOME:-$HOME/.codex}/floway-token"')
+  }
+}
+
 # Build the base-config edit batch and write it through the app-server. Model
 # and effort are opaque, forwarded verbatim, and cleared with JSON null ($null)
 # when unset. A batch status of `ok` or `okOverridden` confirms the intended
@@ -158,17 +181,16 @@ function Write-SetupCodexConfig {
   param([string]$Exe)
   $codexBase = ($SetupEndpoint.TrimEnd('/')) + '/azure-api.codex'
   $runningOnWindows = Test-SetupIsWindows
-  $auth = if ($runningOnWindows) {
-    [ordered]@{
-      command = 'powershell'
-      args = @('-NoProfile', '-Command', '$h = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ''.codex'' }; [IO.File]::ReadAllText((Join-Path $h ''floway-token''))')
-    }
-  } else {
-    [ordered]@{
-      command = 'sh'
-      args = @('-c', 'cat "${CODEX_HOME:-$HOME/.codex}/floway-token"')
+  $nodeExe = $null
+  if ($runningOnWindows) {
+    $node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($node) {
+      $nodeExe = $node.Source
+    } else {
+      Write-SetupWarn 'Node.js is unavailable; concurrent Codex credential lookups may be slower with PowerShell.'
     }
   }
+  $auth = Get-SetupCodexAuth -RunningOnWindows $runningOnWindows -NodeExe $nodeExe
   # Command auth opts a provider into online model refresh. The actor marker
   # enables Codex's client-owned search and image extensions for this provider.
   # https://github.com/openai/codex/blob/1bbdb32789e1f79932df44941236ea3658f6e965/codex-rs/models-manager/src/manager.rs#L413-L415

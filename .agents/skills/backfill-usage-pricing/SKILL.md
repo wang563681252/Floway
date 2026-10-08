@@ -55,3 +55,29 @@ The CLI refuses stale or modified plans, catalog ambiguity, historical selector
 drift, database identity changes, and schema mismatches. A missing metric rate
 remains NULL; a non-NULL aggregate cost does not prove the slice is fully
 priced.
+
+Copilot backfills use the current fetched model catalog's official Copilot
+prices, not a static vendor API rate card. Refresh the saved Copilot upstream's
+models before planning if its cache is missing, obsolete, or at least 24 hours
+old. The raw model key must occur in the cached public family's variants;
+public aliases do not replace that wire identity. Changed prices invalidate the
+saved plan, and the write guards against concurrent catalog changes. Applying current rates to historical usage remains
+an explicit operator decision, not an automatic consequence of catalog refresh.
+
+For historical models absent from the current catalog, `plan --pricing-file`
+accepts an explicitly verified source without changing runtime configuration or
+the model catalog. Use only primary-source prices for that exact model and
+confirm whether the human wants historical rates or current-rate estimates.
+Never substitute a similarly named model. The JSON contains
+`schemaVersion: 1`, `kind: "usage-pricing-source"`, the exact `upstream`, `model`,
+and `modelKey`, an HTTPS `referenceUrl`, canonical ISO `observedAt`, and a
+validated `pricing` in the existing USD-per-base-unit `ModelPricing` shape.
+Generate token rates with the shared conversion helpers from the verified
+source instead of manually transcribing scalar update values.
+
+The saved plan binds the source's canonical path and SHA-256 digest. `apply`
+re-reads it and rejects changed, missing, invalid or scope-mismatched sources.
+Keep the source available through apply; remove both temporary plan and source
+after verification. Missing historical request-level context bands cannot be
+reconstructed from hourly token totals. Get explicit approval before using
+default-band estimates for such records, and report that limitation.

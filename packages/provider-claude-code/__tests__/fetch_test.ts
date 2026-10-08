@@ -128,6 +128,10 @@ const errorJson = (status: number, body: unknown, extraHeaders: Record<string, s
 
 const minimalBody = { max_tokens: 16, messages: [{ role: 'user' as const, content: 'hi' }] };
 
+const drain = async <T>(events: AsyncIterable<T>): Promise<void> => {
+  for await (const _event of events) {}
+};
+
 describe('callClaudeCodeAnthropicMessages — pre-fetch gates', () => {
   test('non-active account → synthetic 503', async () => {
     seedAccount({ state: 'session_terminated', stateMessage: 'revoked' });
@@ -181,10 +185,10 @@ describe('callClaudeCodeAnthropicMessages — header surface', () => {
       call: {
         ...noopUpstreamCallOptions(),
         headers: new Headers({
-          'user-agent': 'claude-cli/2.1.181 (external, cli)',
+          'user-agent': 'claude-cli/2.1.280 (external, cli)',
           'x-app': 'cli',
           'anthropic-version': '2023-06-01',
-          'x-stainless-package-version': '0.94.0',
+          'x-stainless-package-version': '0.112.1',
           'x-claude-code-session-id': 'sess-abc',
           'x-client-request-id': 'req-xyz',
         }),
@@ -194,11 +198,11 @@ describe('callClaudeCodeAnthropicMessages — header surface', () => {
     const init = fetchSpy.mock.calls[0]![1] as RequestInit;
     const wireHeaders = new Headers(init.headers);
     expect(wireHeaders.get('authorization')).toBe('Bearer at_cached');
-    expect(wireHeaders.get('user-agent')).toBe('claude-cli/2.1.181 (external, cli)');
+    expect(wireHeaders.get('user-agent')).toBe('claude-cli/2.1.280 (external, cli)');
     expect(wireHeaders.get('x-app')).toBe('cli');
     expect(wireHeaders.get('anthropic-version')).toBe('2023-06-01');
     expect(wireHeaders.get('anthropic-beta')).toBe('oauth-2025-04-20,claude-code-20250219');
-    expect(wireHeaders.get('x-stainless-package-version')).toBe('0.94.0');
+    expect(wireHeaders.get('x-stainless-package-version')).toBe('0.112.1');
     expect(wireHeaders.get('x-claude-code-session-id')).toBe('sess-abc');
     expect(wireHeaders.get('x-client-request-id')).toBe('req-xyz');
   });
@@ -209,7 +213,7 @@ describe('callClaudeCodeAnthropicMessages — header surface', () => {
     await callClaudeCodeAnthropicMessages({
       upstreamId, model: sonnetModel, body: minimalBody,
       shaped: true,
-      call: { ...noopUpstreamCallOptions(), headers: new Headers({ 'user-agent': 'claude-cli/2.1.181' }) },
+      call: { ...noopUpstreamCallOptions(), headers: new Headers({ 'user-agent': 'claude-cli/2.1.280' }) },
     });
     const wireHeaders = new Headers((fetchSpy.mock.calls[0]![1] as RequestInit).headers);
     expect(wireHeaders.get('content-type')).toBe('application/json');
@@ -223,7 +227,7 @@ describe('callClaudeCodeAnthropicMessages — header surface', () => {
       shaped: true,
       call: {
         ...noopUpstreamCallOptions(),
-        headers: new Headers({ 'user-agent': 'claude-cli/2.1.181', 'content-type': 'application/json; charset=utf-8' }),
+        headers: new Headers({ 'user-agent': 'claude-cli/2.1.280', 'content-type': 'application/json; charset=utf-8' }),
       },
     });
     const wireHeaders = new Headers((fetchSpy.mock.calls[0]![1] as RequestInit).headers);
@@ -294,6 +298,70 @@ describe('callClaudeCodeAnthropicMessages — wire body', () => {
       upstreamId, model: sonnetModel, body: minimalBody, shaped: false, call: noopUpstreamCallOptions(),
     });
     expect(fetchSpy.mock.calls[0]![0]).toBe('https://api.anthropic.com/v1/messages?beta=true');
+  });
+});
+
+describe('callClaudeCodeAnthropicMessages — incomplete stream diagnostics', () => {
+  test('logs upstream trace headers and last raw SSE frames when message_stop is absent', async () => {
+    seedAccount({ accessToken: freshAccessTokenEntry });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('event: message_start\ndata: {"type":"message_start"}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"text":"partial"}}\n\n'));
+          controller.close();
+        },
+      }),
+      {
+        status: 200,
+        headers: {
+          'content-type': 'text/event-stream',
+          'request-id': 'req_trace',
+          'cf-ray': 'ray_trace',
+          traceresponse: 'trace_response',
+        },
+      },
+    ));
+
+    const result = await callClaudeCodeAnthropicMessages({
+      upstreamId, model: sonnetModel, body: minimalBody, shaped: false, call: noopUpstreamCallOptions(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    await drain(result.events);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const line = warn.mock.calls[0]![0] as string;
+    expect(line).toContain('claude_code_messages_stream_incomplete');
+    expect(line).toContain('upstream_id=up_cc');
+    expect(line).toContain('request_id=req_trace');
+    expect(line).toContain('cf_ray=ray_trace');
+    expect(line).toContain('trace_response=trace_response');
+    expect(line).toContain('raw_sse_frames=2');
+    expect(line).toContain('terminal_event=null');
+    expect(line).toContain('message_delta');
+  });
+
+  test('does not log a complete Messages stream', async () => {
+    seedAccount({ accessToken: freshAccessTokenEntry });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    ));
+
+    const result = await callClaudeCodeAnthropicMessages({
+      upstreamId, model: sonnetModel, body: minimalBody, shaped: false, call: noopUpstreamCallOptions(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    await drain(result.events);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

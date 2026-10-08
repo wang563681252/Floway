@@ -3,15 +3,21 @@
 // https://github.com/openai/codex/blob/f2bee854a73666e1c3e922a853dda591b1a25fcf/codex-rs/codex-api/src/rate_limits.rs#L27-L100
 // https://github.com/openai/codex/blob/f2bee854a73666e1c3e922a853dda591b1a25fcf/codex-rs/codex-api/src/rate_limits.rs#L217-L228
 
-import { HEAVY_USAGE_THRESHOLD_PERCENT, heaviestPercent } from './subscription-quota';
+import { heaviestPercent, type UsageHeavyOrActive, usageStatusFromHeaviest } from './subscription-quota';
 import type {
   CodexAccountCredentialState,
   CodexQuotaSnapshot,
   CodexQuotaSnapshotMap,
+  CodexRateLimitResetCredit,
   UpstreamRecord,
 } from '../../api/types';
 
 export type CodexRecord = Extract<UpstreamRecord, { kind: 'codex' }>;
+
+export const codexResetCreditIsUsable = (credit: CodexRateLimitResetCredit, now: number): boolean =>
+  credit.reset_type === 'codex_rate_limits'
+  && credit.status === 'available'
+  && (credit.expires_at === null || new Date(credit.expires_at).getTime() > now);
 
 // `chatgpt_plan_type` is an untagged `Known | Unknown(String)` upstream, so the
 // raw value is preserved and a plan this table does not know is forwarded as it
@@ -63,13 +69,19 @@ export interface QuotaEntry {
 
 export type CredentialLookup =
   | { kind: 'present'; credential: CodexAccountCredentialState }
-  | { kind: 'account-id-mismatch'; expectedAccountId: string };
+  | { kind: 'account-id-mismatch'; expectedAccountId: string | null };
 
 export const findCredential = (record: CodexRecord): CredentialLookup => {
   const expectedAccountId = record.config.accounts[0].chatgptAccountId;
   const credential = record.state.accounts.find(account => account.chatgptAccountId === expectedAccountId);
   return credential ? { kind: 'present', credential } : { kind: 'account-id-mismatch', expectedAccountId };
 };
+
+// The editor renders both the redacted row the list returns and the raw patch
+// an import merges into the draft, and those two name the same fact
+// differently.
+export const codexRenewable = (credential: CodexAccountCredentialState): boolean =>
+  credential.refresh_token_set ?? (typeof credential.refresh_token === 'string' && credential.refresh_token.length > 0);
 
 const window = (
   key: QuotaWindow['key'],
@@ -116,11 +128,11 @@ export const latestCredits = (quota: CodexQuotaSnapshotMap | null | undefined): 
   return newest;
 };
 
-export type AccountStatus =
+type CodexDangerStatus =
   | { tone: 'danger'; reason: 'account-id-mismatch' | 'session-terminated' | 'refresh-failed'; detail?: string }
-  | { tone: 'danger'; reason: 'rate-limited'; until: string; detail?: string }
-  | { tone: 'warning'; reason: 'heavy'; percent: number }
-  | { tone: 'success'; reason: 'active' };
+  | { tone: 'danger'; reason: 'rate-limited'; until: string; detail?: string };
+
+export type AccountStatus = CodexDangerStatus | UsageHeavyOrActive;
 
 export const accountStatus = (lookup: CredentialLookup, entries: QuotaEntry[]): AccountStatus => {
   if (lookup.kind === 'account-id-mismatch') return { tone: 'danger', reason: 'account-id-mismatch' };
@@ -132,7 +144,5 @@ export const accountStatus = (lookup: CredentialLookup, entries: QuotaEntry[]): 
     .filter((value): value is string => value !== null)
     .toSorted((left, right) => new Date(right).getTime() - new Date(left).getTime())[0];
   if (until !== undefined) return { tone: 'danger', reason: 'rate-limited', until };
-  const heaviest = heaviestPercent(entries.flatMap(entry => entry.windows.map(item => item.percent)));
-  if (heaviest !== null && heaviest >= HEAVY_USAGE_THRESHOLD_PERCENT) return { tone: 'warning', reason: 'heavy', percent: Math.round(heaviest) };
-  return { tone: 'success', reason: 'active' };
+  return usageStatusFromHeaviest(heaviestPercent(entries.flatMap(entry => entry.windows.map(item => item.percent))));
 };
