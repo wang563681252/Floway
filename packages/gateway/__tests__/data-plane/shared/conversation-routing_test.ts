@@ -396,3 +396,19 @@ test('terminal proof persistence must succeed before a client can observe respon
   expect((await repo.subscriptionConversations.get(request.id))?.phase).toBe('uncertain');
   expect((await repo.subscriptionPools.runtime('pool', Date.now())).every(account => account.inFlight === 0)).toBe(true);
 });
+
+test('a narrowed route cannot hide an existing binding and silently send its session to an unrelated provider', async () => {
+  const { repo, candidates } = await setup();
+  const first = await prepare('session');
+  const response = await consume(await dispatch(candidates, first), first);
+  const next = await prepare('session', [...first.payload.input, ...response.output, input('next')]);
+  const run = vi.fn(async () => ({ type: 'result' as const }));
+  const factory = vi.fn(async () => next.conversation);
+  const unrelated = stubModelCandidate();
+  expect(unrelated.provider.kind).not.toBe('codex');
+  const result = await iterateCandidates([unrelated], 'narrowed-route', next.ctx, 'chat', run, { conversationForRequest: factory });
+  expect(factory).toHaveBeenCalledTimes(1);
+  expect(result.type).toBe('api-error');
+  expect(run).not.toHaveBeenCalled();
+  expect((await repo.subscriptionConversations.get(first.id))?.upstreamId).toBe('account-a');
+});

@@ -34,8 +34,7 @@ export class SubscriptionPoolSelection {
   async next(ctx: Pick<GatewayCtx, 'abortSignal'> & { apiKeyId?: string }): Promise<{ candidate: ModelCandidate; lease?: SubscriptionPoolLease; turn?: ConversationTurn } | null> {
     if (!this.initialized) {
       this.initialized = true;
-      if (!this.conversations && this.options.conversationForRequest
-        && this.pools.some(pool => this.candidates.some(candidate => candidate.provider.kind === pool.provider))) {
+      if (!this.conversations && this.options.conversationForRequest && this.pools.length > 0) {
         const conversation = await this.options.conversationForRequest();
         if (conversation) this.conversations = new ConversationPoolSelection(this.candidates, this.pools, { ...this.options, conversation });
       }

@@ -51,7 +51,7 @@ export class ConversationPoolSelection {
     const repo = getRepo();
     const matchingPools = this.pools.filter(pool => this.candidates.some(candidate => pool.provider === candidate.provider.kind));
     const bound: Array<{ pool: SubscriptionPool; binding: SubscriptionConversation }> = [];
-    for (const pool of matchingPools) {
+    for (const pool of this.pools) {
       const binding = await repo.subscriptionConversations.get(await request.key(pool.id, ctx.apiKeyId));
       if (binding) bound.push({ pool, binding });
     }
