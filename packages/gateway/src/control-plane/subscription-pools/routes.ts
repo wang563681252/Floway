@@ -6,7 +6,7 @@ import type { CtxWithJson } from '../../middleware/zod-validator.ts';
 import { getRepo } from '../../repo/index.ts';
 import { SubscriptionPoolConflictError, type SubscriptionPool } from '../../repo/subscription-pools.ts';
 import { shortId } from '../../shared/short-id.ts';
-import type { subscriptionPoolBody } from '../schemas.ts';
+import type { subscriptionPoolBody, subscriptionPoolMemberBody } from '../schemas.ts';
 
 export const subscriptionPoolToJson = (pool: SubscriptionPool) => ({
   id: pool.id, name: pool.name, provider: pool.provider, enabled: pool.enabled,
@@ -19,6 +19,7 @@ export const listSubscriptionPools = async (c: Context) => {
   const now = Date.now();
   const result = await Promise.all(pools.map(async pool => {
     const runtime = await repo.subscriptionPools.runtime(pool.id, now);
+    const conversations = await repo.subscriptionConversations.list(pool.id);
     const accounts = await Promise.all(pool.upstreamIds.map(async id => {
       const upstream = await repo.upstreams.getById(id);
       if (upstream === null) throw new Error('Subscription pool member disappeared while reading status');
@@ -27,17 +28,33 @@ export const listSubscriptionPools = async (c: Context) => {
       const status = await provider.getSubscriptionAccountStatus();
       const fresh = status.observedAt !== null && status.observedAt <= now && now - status.observedAt <= 5 * 60_000;
       const active = runtime.find(item => item.upstreamId === id);
+      if (!active) throw new Error('Subscription pool membership changed while reading account status');
       return {
         upstream_id: id, name: upstream.name, enabled: upstream.enabled,
         health: status.health, in_flight: active?.inFlight ?? 0, selections: active?.selections ?? 0,
         utilization: fresh ? status.utilization : null, quota_observed_at: status.observedAt,
         quota_fresh: fresh, unavailable_until: fresh ? status.unavailableUntil : null,
         cooldowns: active?.cooldowns ?? [],
+        accept_new_sessions: active.acceptNewSessions,
+        recent_sessions: conversations.filter(conversation =>
+          conversation.accountIdentity === JSON.stringify([pool.provider, status.identity])
+          && conversation.phase !== 'closed' && conversation.lastSeenAt >= now - 30 * 60_000).length,
       };
     }));
     return { ...subscriptionPoolToJson(pool), accounts };
   }));
   return c.json(result);
+};
+
+export const updateSubscriptionPoolMember = async (c: CtxWithJson<typeof subscriptionPoolMemberBody>) => {
+  const repo = getRepo();
+  const pool = await repo.subscriptionPools.get(c.req.param('id') ?? '');
+  const upstreamId = c.req.param('upstreamId') ?? '';
+  if (!pool?.upstreamIds.includes(upstreamId)) return c.json({ error: 'Subscription pool member not found' }, 404);
+  if (!await repo.subscriptionPools.setAcceptNewSessions(upstreamId, c.req.valid('json').accept_new_sessions)) {
+    return c.json({ error: 'Subscription pool member changed concurrently' }, 409);
+  }
+  return c.body(null, 204);
 };
 
 const save = async (c: CtxWithJson<typeof subscriptionPoolBody>, existing: SubscriptionPool | null) => {

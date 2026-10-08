@@ -1,4 +1,4 @@
-import type { ConversationClaimResult, SubscriptionConversation, SubscriptionConversationMigration, SubscriptionConversationsRepo } from './subscription-conversations.ts';
+import type { ConversationClaimResult, SubscriptionConversation, SubscriptionConversationBackup, SubscriptionConversationMigration, SubscriptionConversationsRepo } from './subscription-conversations.ts';
 import type { SqlDatabase, SqlPreparedStatement } from '@floway-dev/platform';
 
 interface ConversationRow {
@@ -46,14 +46,19 @@ export class SqlSubscriptionConversationsRepo implements SubscriptionConversatio
   }
 
   async get(id: string): Promise<SubscriptionConversation | null> {
-    await this.recover(id);
-    const row = await this.db.prepare('SELECT * FROM subscription_conversations WHERE id = ?').bind(id).first<ConversationRow>();
+    let row = await this.db.prepare('SELECT * FROM subscription_conversations WHERE id = ?').bind(id).first<ConversationRow>();
+    if (row && ['preparing', 'dispatched'].includes(row.phase) && row.lock_until !== null && row.lock_until <= Date.now()) {
+      await this.recover(id);
+      row = await this.db.prepare('SELECT * FROM subscription_conversations WHERE id = ?').bind(id).first<ConversationRow>();
+    }
     return row ? decode(row) : null;
   }
 
   async list(poolId: string): Promise<SubscriptionConversation[]> {
     const { results } = await this.db.prepare('SELECT * FROM subscription_conversations WHERE pool_id = ? ORDER BY last_seen_at DESC').bind(poolId).all<ConversationRow>();
-    for (const row of results) await this.recover(row.id);
+    const expired = results.filter(row => ['preparing', 'dispatched'].includes(row.phase) && row.lock_until !== null && row.lock_until <= Date.now());
+    if (expired.length === 0) return results.map(decode);
+    for (const row of expired) await this.recover(row.id);
     const refreshed = await this.db.prepare('SELECT * FROM subscription_conversations WHERE pool_id = ? ORDER BY last_seen_at DESC').bind(poolId).all<ConversationRow>();
     return refreshed.results.map(decode);
   }
@@ -69,7 +74,7 @@ export class SqlSubscriptionConversationsRepo implements SubscriptionConversatio
   }
 
   async start(input: Parameters<SubscriptionConversationsRepo['start']>[0]): Promise<ConversationClaimResult> {
-    await this.recover(input.id, input.now);
+    await this.get(input.id);
     if (input.turnKey !== null) {
       const previous = await this.db.prepare('SELECT phase FROM subscription_conversation_turns WHERE conversation_id = ? AND turn_key = ?')
         .bind(input.id, input.turnKey).first<{ phase: string }>();
@@ -184,6 +189,47 @@ export class SqlSubscriptionConversationsRepo implements SubscriptionConversatio
   }
 
   async deleteAll(): Promise<void> {
-    await this.db.prepare('DELETE FROM subscription_conversations').run();
+    await this.batch([
+      this.db.prepare('DELETE FROM subscription_conversation_turns'),
+      this.db.prepare('DELETE FROM subscription_conversation_migrations'),
+      this.db.prepare('DELETE FROM subscription_conversations'),
+    ]);
+  }
+
+  async backup(poolId: string): Promise<SubscriptionConversationBackup[]> {
+    const snapshots: SubscriptionConversationBackup[] = [];
+    for (const row of await this.list(poolId)) {
+      const { requestToken: _request, leaseToken: _lease, turnKey: _turn, requestHash: _hash, lockUntil: _lock, ...conversation } = row;
+      const { results } = await this.db.prepare('SELECT turn_key, request_hash, phase FROM subscription_conversation_turns WHERE conversation_id = ?')
+        .bind(row.id).all<{ turn_key: string; request_hash: string; phase: 'completed' | 'uncertain' }>();
+      snapshots.push({ conversation, turns: results.map(turn => ({ turnKey: turn.turn_key, requestHash: turn.request_hash, phase: turn.phase })), history: await this.history(row.id) });
+    }
+    return snapshots;
+  }
+
+  async restore(snapshot: SubscriptionConversationBackup): Promise<boolean> {
+    const row = snapshot.conversation;
+    const result = await this.db.prepare(`INSERT INTO subscription_conversations
+      (id, pool_id, api_key_id, upstream_id, account_identity, version, phase, last_seen_at,
+        context_hash, context_length, settings_hash, model_key, portable, blocked_reason,
+        target_upstream_id, target_identity, migrations, migration_requested)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) ON CONFLICT(id) DO NOTHING`).bind(
+      row.id, row.poolId, row.apiKeyId, row.upstreamId, row.accountIdentity, row.version + 1,
+      row.phase === 'closed' ? 'closed' : 'uncertain', row.lastSeenAt, row.contextHash, row.contextLength,
+      row.settingsHash, row.modelKey, row.portable ? 1 : 0, row.phase === 'closed' ? row.blockedReason : 'restored_requires_confirmation',
+      row.targetUpstreamId, row.targetIdentity, row.migrations,
+    ).run();
+    if (result.meta.changes !== 1) return false;
+    const statements: SqlPreparedStatement[] = [
+      this.db.prepare(`INSERT INTO subscription_conversation_turns (conversation_id, turn_key, request_hash, phase)
+        SELECT ?, json_extract(value, '$.turnKey'), json_extract(value, '$.requestHash'), json_extract(value, '$.phase') FROM json_each(?)`)
+        .bind(row.id, JSON.stringify(snapshot.turns)),
+      this.db.prepare(`INSERT INTO subscription_conversation_migrations
+        (conversation_id, version, from_upstream_id, to_upstream_id, occurred_at)
+        SELECT ?, json_extract(value, '$.version'), json_extract(value, '$.fromUpstreamId'), json_extract(value, '$.toUpstreamId'),
+          json_extract(value, '$.occurredAt') FROM json_each(?)`).bind(row.id, JSON.stringify(snapshot.history)),
+    ];
+    await this.batch(statements);
+    return true;
   }
 }

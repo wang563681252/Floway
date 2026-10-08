@@ -25,6 +25,7 @@ export interface ConversationRequest {
   context: ConversationContext;
   settingsHash: string;
   requestHash: string;
+  turnKey: string | null;
   key(poolId: string, apiKeyId: string): Promise<string>;
   hash(entries: readonly unknown[], length?: number): Promise<string>;
 }
@@ -199,15 +200,16 @@ export const createConversationRequest = async (
   codec?: AffinityCodec,
 ): Promise<ConversationRequest | null> => {
   const explicit = headers.get('x-floway-conversation-id');
+  const nativeClient = protocol === 'messages'
+    ? subscriptionSessionForRequest('claude-code', headers, payload)
+    : subscriptionSessionForRequest('codex', headers, payload);
   let client: SubscriptionClientSession | null;
   if (explicit !== null) {
     if (!explicit.trim() || explicit.length > 1024) throw new HTTPException(400, { message: 'x-floway-conversation-id must be a non-empty identifier up to 1024 characters' });
     const branch = headers.get('x-floway-conversation-branch')?.trim() ?? explicit.trim();
-    client = { sessionId: explicit.trim(), threadId: branch, turnId: headers.get('x-floway-turn-id')?.trim() ?? null };
+    client = { sessionId: explicit.trim(), threadId: branch, turnId: headers.get('x-floway-turn-id')?.trim() ?? nativeClient?.turnId ?? null };
   } else {
-    client = protocol === 'messages'
-      ? subscriptionSessionForRequest('claude-code', headers, payload)
-      : subscriptionSessionForRequest('codex', headers, payload);
+    client = nativeClient;
   }
   if (!client) return null;
   const branch = headers.get('x-floway-conversation-branch');
@@ -228,10 +230,15 @@ export const createConversationRequest = async (
     && payload.input.some(item => isRecord(item) && item.type === 'compaction_trigger') ? 'compact' : intent;
   const settings = isRecord(payload) ? Object.fromEntries(Object.entries(payload)
     .filter(([name]) => !['input', 'messages', 'contents', 'metadata', 'client_metadata', 'previous_response_id', 'stream'].includes(name))) : payload;
+  const requestHash = await sign('conversation-request', [context.entries, settings, effectiveIntent]);
+  // Native agent turn IDs span tool continuations; explicit Floway turn IDs
+  // identify one model request. https://github.com/openai/codex/blob/a16863f8704831d13e041ed7dba2c4a57a2a940b/codex-rs/core/src/responses_metadata.rs
+  const turnKey = client.turnId === null ? null : await sign('conversation-turn',
+    headers.has('x-floway-turn-id') ? client.turnId : [client.turnId, requestHash]);
   return {
     client, protocol, intent: effectiveIntent, context,
     settingsHash: await sign('conversation-settings', settings),
-    requestHash: await sign('conversation-request', [context.entries, settings, effectiveIntent]),
+    requestHash, turnKey,
     key: async (poolId, apiKeyId) => await sign('conversation-binding', [apiKeyId, poolId, explicit === null ? protocol : 'floway', client.sessionId, client.threadId]),
     hash: async (entries, length = entries.length) => await sign('conversation-context', entries.slice(0, length)),
   };

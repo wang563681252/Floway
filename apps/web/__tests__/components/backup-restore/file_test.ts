@@ -7,6 +7,8 @@ const data = {
   apiKeys: [],
   upstreams: [],
   subscriptionPools: [],
+  subscriptionConversations: [],
+  subscriptionPoolIntake: [],
   proxies: [],
   usage: [],
   searchUsage: [],
@@ -30,10 +32,14 @@ describe('backup file validation', () => {
     expect(parseBackupFile(backup({ version: 19 })).ok).toBe(false);
   });
 
-  it('accepts version 20 without pools and rejects a version 21 file that drops them', () => {
+  it('accepts versions 20 and 21 but requires routing metadata in version 22', () => {
     const { subscriptionPools: _pools, ...legacy } = data;
     expect(parseBackupFile(backup({ version: 20, data: legacy })).ok).toBe(true);
+    expect(parseBackupFile(backup({ version: 21, data: { ...legacy, subscriptionPools: [] } })).ok).toBe(true);
+    expect(parseBackupFile(backup({ version: 21, data: legacy })).ok).toBe(false);
     expect(parseBackupFile(backup({ data: legacy })).ok).toBe(false);
+    const { subscriptionConversations: _conversations, ...missingRouting } = data;
+    expect(parseBackupFile(backup({ data: missingRouting })).ok).toBe(false);
   });
 
   it('rejects unknown fields instead of stripping them', () => {

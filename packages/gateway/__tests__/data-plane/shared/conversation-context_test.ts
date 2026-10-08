@@ -106,3 +106,18 @@ test('only authenticated, empty Floway affinity bookkeeping is excluded from the
     }],
   }, ctx.affinity.codec)).portable).toBe(true);
 });
+
+test('native user-turn IDs permit changed tool continuations, while explicit Floway request IDs remain strict', async () => {
+  const nativeHeaders = new Headers({ 'session-id': 'session' });
+  const metadata = { client_metadata: { turn_id: 'same-user-turn' } };
+  const first = await createConversationRequest(secret, 'responses', { ...payload, ...metadata }, nativeHeaders);
+  const next = await createConversationRequest(secret, 'responses', { ...payload, ...metadata, input: [...payload.input, { type: 'function_call_output', call_id: 'tool', output: 'bytes' }] }, nativeHeaders);
+  expect(first?.turnKey).not.toBe(next?.turnKey);
+  const retry = await createConversationRequest(secret, 'responses', { ...payload, ...metadata }, nativeHeaders);
+  expect(first?.turnKey).toBe(retry?.turnKey);
+  const explicitHeaders = new Headers({ 'x-floway-conversation-id': 'session', 'x-floway-turn-id': 'one-request' });
+  const explicit = await createConversationRequest(secret, 'responses', payload, explicitHeaders);
+  const changed = await createConversationRequest(secret, 'responses', { ...payload, input: [] }, explicitHeaders);
+  expect(explicit?.turnKey).toBe(changed?.turnKey);
+  expect(explicit?.turnKey).not.toContain('one-request');
+});

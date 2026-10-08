@@ -6,6 +6,7 @@ import { parseDisabledPublicModelIdsWire } from '../../repo/disabled-public-mode
 import { isOpenAIResponsesRetentionSeconds, OPENAI_RESPONSES_RETENTION_MAX_SECONDS, OPENAI_RESPONSES_RETENTION_MIN_SECONDS } from '../../repo/openai-responses-retention.ts';
 import { isDirectFallbackId, normalizeProxyFallbackList } from '../../repo/proxy-fallback-list.ts';
 import { SEED_ADMIN_USER_ID } from '../../repo/seed-admin.ts';
+import type { SubscriptionConversationBackup } from '../../repo/subscription-conversations.ts';
 import type { SubscriptionPool } from '../../repo/subscription-pools.ts';
 import type { ApiKey, PerformanceMetric, PerformanceTelemetryRecord, UsageRecord, User, WebSearchUsageRecord } from '../../repo/types.ts';
 import { PASSWORD_HASH_SCHEME } from '../../shared/passwords.ts';
@@ -34,6 +35,8 @@ export interface SerializedProxy {
 
 export interface ParsedImportData {
   subscriptionPools: SubscriptionPool[];
+  subscriptionConversations: SubscriptionConversationBackup[];
+  subscriptionPoolIntake: Array<{ upstreamId: string; acceptNewSessions: boolean }>;
   users: User[];
   apiKeys: ApiKey[];
   upstreams: UpstreamRecord[];
@@ -513,6 +516,41 @@ export const parseImportData = (value: unknown): ImportDataParseResult => {
   if (new Set(subscriptionPools.records.map(pool => pool.id)).size !== subscriptionPools.records.length) {
     return { type: 'invalid', error: 'invalid subscriptionPools: duplicate pool id' };
   }
+  const nullableHash = z.string().min(1).nullable();
+  const conversationSchema = z.object({
+    conversation: z.object({
+      id: z.string().min(1), poolId: z.string().min(1), apiKeyId: z.string().min(1), upstreamId: z.string().min(1),
+      accountIdentity: z.string().min(1), version: z.number().int().positive(),
+      phase: z.enum(['active', 'preparing', 'dispatched', 'uncertain', 'blocked', 'closed']),
+      lastSeenAt: z.number().int().nonnegative(), contextHash: nullableHash, contextLength: z.number().int().nonnegative(),
+      settingsHash: nullableHash, modelKey: nullableHash, portable: z.boolean(), blockedReason: z.string().nullable(),
+      targetUpstreamId: z.string().min(1).nullable(), targetIdentity: nullableHash,
+      migrations: z.number().int().nonnegative(), migrationRequested: z.boolean(),
+    }).strict(),
+    turns: z.array(z.object({ turnKey: z.string().min(1), requestHash: z.string().min(1), phase: z.enum(['completed', 'uncertain']) }).strict()),
+    history: z.array(z.object({
+      conversationId: z.string().min(1), version: z.number().int().positive(), fromUpstreamId: z.string().min(1),
+      toUpstreamId: z.string().min(1), occurredAt: z.number().int().nonnegative(),
+    }).strict()),
+  }).strict().refine(snapshot => new Set(snapshot.turns.map(turn => turn.turnKey)).size === snapshot.turns.length
+    && new Set(snapshot.history.map(migration => migration.version)).size === snapshot.history.length
+    && snapshot.history.every(migration => migration.conversationId === snapshot.conversation.id && migration.version <= snapshot.conversation.version), {
+    message: 'Conversation journals must have unique identities and consistent versions',
+  });
+  const subscriptionConversations = parseCollection('subscriptionConversations', conversationSchema, value.subscriptionConversations, {
+    arrayError: 'subscriptionConversations must be an array', optional: true,
+  });
+  if (subscriptionConversations.type === 'invalid') return subscriptionConversations;
+  if (new Set(subscriptionConversations.records.map(snapshot => snapshot.conversation.id)).size !== subscriptionConversations.records.length) {
+    return { type: 'invalid', error: 'invalid subscriptionConversations: duplicate conversation id' };
+  }
+  const subscriptionPoolIntake = parseCollection('subscriptionPoolIntake', z.object({
+    upstreamId: z.string().min(1), acceptNewSessions: z.boolean(),
+  }).strict(), value.subscriptionPoolIntake, { arrayError: 'subscriptionPoolIntake must be an array', optional: true });
+  if (subscriptionPoolIntake.type === 'invalid') return subscriptionPoolIntake;
+  if (new Set(subscriptionPoolIntake.records.map(member => member.upstreamId)).size !== subscriptionPoolIntake.records.length) {
+    return { type: 'invalid', error: 'invalid subscriptionPoolIntake: duplicate upstream id' };
+  }
   const proxyIds = new Map<string, number>();
   for (let index = 0; index < proxies.records.length; index++) {
     const prior = proxyIds.get(proxies.records[index].id);
@@ -551,6 +589,8 @@ export const parseImportData = (value: unknown): ImportDataParseResult => {
     type: 'ok',
     data: {
       subscriptionPools: subscriptionPools.records,
+      subscriptionConversations: subscriptionConversations.records,
+      subscriptionPoolIntake: subscriptionPoolIntake.records,
       users: users.records,
       apiKeys: apiKeys.records,
       upstreams: upstreams.records,

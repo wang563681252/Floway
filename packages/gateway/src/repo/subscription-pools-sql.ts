@@ -76,9 +76,14 @@ export class SqlSubscriptionPoolsRepo implements SubscriptionPoolsRepo {
   }
 
   async deleteAll(): Promise<void> {
-    await this.db.prepare('DELETE FROM subscription_conversations').run();
-    await this.db.prepare('DELETE FROM subscription_pool_leases').run();
-    await this.db.prepare('DELETE FROM subscription_pools').run();
+    if (!this.db.batch) throw new Error('Subscription pool replacement requires atomic database batches');
+    await this.db.batch([
+      this.db.prepare('DELETE FROM subscription_conversation_turns'),
+      this.db.prepare('DELETE FROM subscription_conversation_migrations'),
+      this.db.prepare('DELETE FROM subscription_conversations'),
+      this.db.prepare('DELETE FROM subscription_pool_leases'),
+      this.db.prepare('DELETE FROM subscription_pools'),
+    ]);
   }
 
   async runtime(poolId: string, now: number): Promise<SubscriptionPoolAccountRuntime[]> {

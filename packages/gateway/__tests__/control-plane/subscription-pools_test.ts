@@ -72,9 +72,10 @@ test('export/import round-trips only pool configuration, not active leases and c
   expect(lease).not.toBeNull();
   const exported = await app.request('/api/export', { headers: { 'x-floway-session': adminSession } });
   const payload = await exported.json() as { version: number; data: { subscriptionPools: SubscriptionPool[] } };
-  expect(payload.version).toBe(21);
+  expect(payload.version).toBe(22);
   expect(payload.data.subscriptionPools).toHaveLength(1);
   expect(JSON.stringify(payload)).not.toContain('"token":"live"');
+  await repo.subscriptionPools.release('live');
   const restored = await app.request('/api/import', {
     method: 'POST', headers: { 'x-floway-session': adminSession, 'content-type': 'application/json' },
     body: JSON.stringify({ mode: 'replace', version: payload.version, data: payload.data }),

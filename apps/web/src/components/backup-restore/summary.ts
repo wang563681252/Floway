@@ -6,11 +6,14 @@ export const PREVIEW_LABEL_KEYS = [
   'apiKeys',
   'upstreams',
   'subscriptionPools',
+  'subscriptionConversations',
+  'subscriptionPoolIntake',
   'proxies',
   'usage',
   'searchUsage',
   'performance',
 ] as const;
+const SUMMARY_LABEL_KEYS = [...PREVIEW_LABEL_KEYS, 'subscriptionConversationsPreserved'] as const;
 
 export const countRecords = (data: BackupFileData): Record<string, number> => {
   const counts: Record<string, number> = {};
@@ -29,7 +32,7 @@ export const recordSummary = (
   t: TFunction,
   locale: string,
 ): string => {
-  const parts = PREVIEW_LABEL_KEYS
+  const parts = SUMMARY_LABEL_KEYS
     .filter(key => counts[key] > 0)
     .map(key => t(`dashboard.backupRestore.import.imported.${key}`, {
       count: counts[key],

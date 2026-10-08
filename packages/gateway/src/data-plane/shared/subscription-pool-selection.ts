@@ -12,7 +12,8 @@ import type { ApiErrorResult, ModelCandidate } from '@floway-dev/provider';
 export { subscriptionPoolModelKey, type PoolIterationOptions };
 
 export class SubscriptionPoolSelection {
-  private readonly conversations: ConversationPoolSelection | undefined;
+  private conversations: ConversationPoolSelection | undefined;
+  private initialized = false;
   private readonly remaining: ModelCandidate[];
   private busy = false;
   private retryAt: number | null = null;
@@ -21,7 +22,7 @@ export class SubscriptionPoolSelection {
   get conversationFailure() { return this.conversations?.failure; }
 
   constructor(
-    candidates: readonly ModelCandidate[],
+    private readonly candidates: readonly ModelCandidate[],
     private readonly pools: readonly SubscriptionPool[],
     private readonly options: PoolIterationOptions,
   ) {
@@ -31,6 +32,14 @@ export class SubscriptionPoolSelection {
   }
 
   async next(ctx: Pick<GatewayCtx, 'abortSignal'> & { apiKeyId?: string }): Promise<{ candidate: ModelCandidate; lease?: SubscriptionPoolLease; turn?: ConversationTurn } | null> {
+    if (!this.initialized) {
+      this.initialized = true;
+      if (!this.conversations && this.options.conversationForRequest
+        && this.pools.some(pool => this.candidates.some(candidate => candidate.provider.kind === pool.provider))) {
+        const conversation = await this.options.conversationForRequest();
+        if (conversation) this.conversations = new ConversationPoolSelection(this.candidates, this.pools, { ...this.options, conversation });
+      }
+    }
     if (this.conversations) {
       const selected = await this.conversations.next(ctx);
       if (selected || this.conversations.failure) return selected;

@@ -1,9 +1,9 @@
-import type { ConversationClaimResult, SubscriptionConversation, SubscriptionConversationMigration, SubscriptionConversationsRepo } from '../../src/repo/subscription-conversations.ts';
+import type { ConversationClaimResult, SubscriptionConversation, SubscriptionConversationBackup, SubscriptionConversationMigration, SubscriptionConversationsRepo } from '../../src/repo/subscription-conversations.ts';
 import type { SubscriptionPoolsRepo } from '../../src/repo/subscription-pools.ts';
 
 export class MemorySubscriptionConversationsRepo implements SubscriptionConversationsRepo {
   private readonly rows = new Map<string, SubscriptionConversation>();
-  private readonly turns = new Map<string, 'completed' | 'uncertain'>();
+  private readonly turns = new Map<string, Map<string, { phase: 'completed' | 'uncertain'; requestHash: string }>>();
   private readonly migrations = new Map<string, SubscriptionConversationMigration[]>();
 
   constructor(private readonly pools: SubscriptionPoolsRepo) {}
@@ -48,8 +48,8 @@ export class MemorySubscriptionConversationsRepo implements SubscriptionConversa
     if (!await this.pools.isLeaseActive(input.leaseToken, input.now)) return { kind: 'conflict' };
     const previous = await this.get(input.id);
     if (input.turnKey) {
-      const turn = this.turns.get(JSON.stringify([input.id, input.turnKey]));
-      if (turn) return { kind: turn === 'completed' ? 'repeated' : 'uncertain' };
+      const turn = this.turns.get(input.id)?.get(input.turnKey);
+      if (turn) return { kind: turn.phase === 'completed' ? 'repeated' : 'uncertain' };
     }
     const row = this.rows.get(input.id);
     if (row?.phase === 'uncertain') return { kind: 'uncertain' };
@@ -127,7 +127,10 @@ export class MemorySubscriptionConversationsRepo implements SubscriptionConversa
       row.blockedReason = input.reason ?? (input.phase === 'uncertain' ? 'execution_uncertain' : 'upstream_rejected');
     }
     if (row.turnKey && (input.phase === 'completed' || input.phase === 'uncertain')) {
-      this.turns.set(JSON.stringify([row.id, row.turnKey]), input.phase);
+      if (row.requestHash === null) throw new Error('Conversation turn has no request hash');
+      const turns = this.turns.get(row.id) ?? new Map();
+      turns.set(row.turnKey, { phase: input.phase, requestHash: row.requestHash });
+      this.turns.set(row.id, turns);
     }
     if (input.phase !== 'uncertain') {
       row.requestToken = null;
@@ -180,6 +183,8 @@ export class MemorySubscriptionConversationsRepo implements SubscriptionConversa
   }
 
   async deleteAll(): Promise<void> {
+    if ([...this.rows.values()].some(row => ['preparing', 'dispatched'].includes(row.phase)
+      || row.phase === 'uncertain' && row.requestToken !== null)) throw new Error('Conversation has active or uncertain execution');
     this.rows.clear();
     this.turns.clear();
     this.migrations.clear();
@@ -190,7 +195,32 @@ export class MemorySubscriptionConversationsRepo implements SubscriptionConversa
       if (row.poolId !== poolId) continue;
       this.rows.delete(row.id);
       this.migrations.delete(row.id);
-      for (const key of this.turns.keys()) if (JSON.parse(key)[0] === row.id) this.turns.delete(key);
+      this.turns.delete(row.id);
     }
+  }
+
+  async backup(poolId: string): Promise<SubscriptionConversationBackup[]> {
+    const snapshots: SubscriptionConversationBackup[] = [];
+    for (const row of await this.list(poolId)) {
+      const { requestToken: _request, leaseToken: _lease, turnKey: _turn, requestHash: _hash, lockUntil: _lock, ...conversation } = row;
+      snapshots.push({
+        conversation, turns: [...this.turns.get(row.id) ?? []].map(([turnKey, turn]) => ({ turnKey, ...turn })),
+        history: await this.history(row.id),
+      });
+    }
+    return snapshots;
+  }
+
+  async restore(snapshot: SubscriptionConversationBackup): Promise<boolean> {
+    if (this.rows.has(snapshot.conversation.id)) return false;
+    const row = snapshot.conversation;
+    this.rows.set(row.id, {
+      ...row, version: row.version + 1, phase: row.phase === 'closed' ? 'closed' : 'uncertain',
+      blockedReason: row.phase === 'closed' ? row.blockedReason : 'restored_requires_confirmation', migrationRequested: false,
+      requestToken: null, leaseToken: null, turnKey: null, requestHash: null, lockUntil: null,
+    });
+    this.turns.set(row.id, new Map(snapshot.turns.map(turn => [turn.turnKey, { phase: turn.phase, requestHash: turn.requestHash }])));
+    this.migrations.set(row.id, snapshot.history.map(migration => ({ ...migration })));
+    return true;
   }
 }

@@ -145,7 +145,7 @@ export class ConversationPoolSelection {
     const result = await repo.subscriptionConversations.start({
       id, poolId: pool.id, apiKeyId: ctx.apiKeyId, upstreamId: lease.upstreamId, identity: lease.identity,
       leaseToken: lease.token, requestToken: lease.token, now: Date.now(), lockUntil: lease.expiresAt,
-      turnKey: request.client.turnId, requestHash: request.requestHash, migration, expectedVersion: binding?.version ?? null,
+      turnKey: request.turnKey, requestHash: request.requestHash, migration, expectedVersion: binding?.version ?? null,
     }).catch(async error => {
       try { await repo.subscriptionPools.release(lease.token); } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], 'Conversation claim and reservation cleanup failed', { cause: error });

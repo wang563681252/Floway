@@ -13,8 +13,8 @@ import { InMemoryRepo } from '../../repo/memory.ts';
 import { saveUpstreamForTest } from '../../repo/upstreams.ts';
 import { mockChatGatewayCtx } from '../../test-utils/gateway-ctx.ts';
 import { codexPoolUpstream, subscriptionPoolFixture } from '../../test-utils/subscription-pools.ts';
-import type { ProtocolFrame } from '@floway-dev/protocols/common';
-import { collectOpenAIResponsesProtocolEventsToResult, type CanonicalOpenAIResponsesPayload, type OpenAIResponsesStreamEvent, type OpenAIResponsesResult } from '@floway-dev/protocols/openai-responses';
+import { eventFrame, type ProtocolFrame } from '@floway-dev/protocols/common';
+import { collectOpenAIResponsesProtocolEventsToResult, type OpenAIResponsesStreamEvent, type OpenAIResponsesResult } from '@floway-dev/protocols/openai-responses';
 import type { ApiErrorResult, ModelCandidate } from '@floway-dev/provider';
 import { stubModelCandidate, stubProviderModel } from '@floway-dev/test-utils';
 import { canonicalizeOpenAIResponsesPayload } from '@floway-dev/translate';
@@ -48,7 +48,7 @@ const setup = async (limit: number | null = 50) => {
   return { repo, candidates };
 };
 const prepare = async (session: string, entries: readonly unknown[] = [input('hello')], intent: ConversationIntent = 'generate',
-  branch = session, extra: Partial<CanonicalOpenAIResponsesPayload> = {}) => {
+  branch = session, extra: Record<string, unknown> = {}) => {
   const ctx = mockChatGatewayCtx({ conversationSecret: secret });
   const headers = new Headers({ 'x-floway-conversation-id': session, 'x-floway-conversation-branch': branch });
   const payload = canonicalizeOpenAIResponsesPayload({ model: 'model', input: entries, ...extra });
@@ -308,5 +308,91 @@ test('conversation persistence failure releases the acquired reservation and pro
   const failure = new Error('conversation database unavailable');
   vi.spyOn(repo.subscriptionConversations, 'start').mockRejectedValueOnce(failure);
   await expect(dispatch(candidates, request)).rejects.toBe(failure);
+  expect((await repo.subscriptionPools.runtime('pool', Date.now())).every(account => account.inFlight === 0)).toBe(true);
+});
+
+test('a native agent user-turn ID spans legitimate tool continuations without moving the account', async () => {
+  const { repo, candidates } = await setup();
+  const metadata = { client_metadata: { session_id: 'native-session', turn_id: 'user-turn' } };
+  const first = await prepare('session', [input('read a file')], 'generate', 'session', metadata);
+  const calls: OpenAIResponsesResult = {
+    ...answer, output: [
+      { type: 'function_call', id: 'fc_test', call_id: 'call', name: 'read', arguments: '{"path":"a"}', status: 'completed' },
+    ],
+  };
+  const response = await consume(await dispatch(candidates, first, async () => ({ type: 'events', events: syntheticEventsFromResult(calls) })), first);
+  const continued = await prepare('session', [...first.payload.input, ...response.output, { type: 'function_call_output', call_id: 'call', output: 'bytes' }], 'generate', 'session', metadata);
+  expect(continued.conversation.turnKey).not.toBe(first.conversation.turnKey);
+  await consume(await dispatch(candidates, continued), continued);
+  expect(await repo.subscriptionConversations.get(first.id)).toMatchObject({ phase: 'active', upstreamId: 'account-a', migrations: 0 });
+  const replay = await dispatch(candidates, continued);
+  expect(replay.type === 'api-error' && replay.status).toBe(409);
+});
+
+test('missing terminal frames are uncertain and never falsely advance the context proof', async () => {
+  const { repo, candidates } = await setup();
+  const request = await prepare('session');
+  const result = await dispatch(candidates, request, async () => ({
+    type: 'events', events: (async function* () {
+      yield eventFrame({ type: 'response.created' as const, response: { ...answer, status: 'in_progress' as const, output: [] } });
+    })(),
+  }));
+  await expect(consume(result, request)).rejects.toThrow('without a terminal');
+  expect(await repo.subscriptionConversations.get(request.id)).toMatchObject({ phase: 'uncertain', contextHash: null, contextLength: 0 });
+  expect((await repo.subscriptionPools.runtime('pool', Date.now())).every(account => account.inFlight === 0)).toBe(true);
+});
+
+test('a real long-turn heartbeat owns the branch past two minutes, then cancellation settles it without a ghost renewal', async () => {
+  const { repo, candidates } = await setup();
+  vi.useFakeTimers();
+  const request = await prepare('session');
+  const result = await dispatch(candidates, request);
+  await vi.advanceTimersByTimeAsync(180_000);
+  expect((await repo.subscriptionConversations.get(request.id))?.phase).toBe('dispatched');
+  if (result.type !== 'events') throw new Error('Expected stream');
+  await wrapOpenAIResponsesClientEgress(result.events, request.ctx, request.payload)[Symbol.asyncIterator]().return?.();
+  expect((await repo.subscriptionConversations.get(request.id))?.phase).toBe('uncertain');
+  const renew = vi.spyOn(repo.subscriptionPools, 'renew');
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(renew).not.toHaveBeenCalled();
+});
+
+test('unpooled requests retain their legacy path without hashing or requiring a conversation secret', async () => {
+  initRepo(new InMemoryRepo());
+  const factory = vi.fn(async () => { throw new Error('Unpooled request must not build a conversation proof'); });
+  const result = await iterateCandidates([stubModelCandidate()], 'legacy-test', mockChatGatewayCtx(), 'chat',
+    async () => ({ type: 'result' as const }), { conversationForRequest: factory });
+  expect(result.type).toBe('result');
+  expect(factory).not.toHaveBeenCalled();
+});
+
+test('a truncated successful turn on the original account never replaces missing history with a portable proof', async () => {
+  const { repo, candidates } = await setup();
+  const first = await prepare('session');
+  await consume(await dispatch(candidates, first), first);
+  const truncated = await prepare('session', [input('only-last-message')]);
+  const response = await consume(await dispatch(candidates, truncated), truncated);
+  expect(await repo.subscriptionConversations.get(first.id)).toMatchObject({ upstreamId: 'account-a', portable: false, phase: 'active' });
+  exhaust(candidates[0]!);
+  const next = await prepare('session', [...truncated.payload.input, ...response.output, input('next')]);
+  const result = await dispatch(candidates, next);
+  expect(result.type === 'api-error' && result.status).toBe(409);
+  expect(await repo.subscriptionConversations.get(first.id)).toMatchObject({ upstreamId: 'account-a', portable: false, migrations: 0 });
+});
+
+test('terminal proof persistence must succeed before a client can observe response.completed', async () => {
+  const { repo, candidates } = await setup();
+  const request = await prepare('session');
+  const result = await dispatch(candidates, request);
+  if (result.type !== 'events') throw new Error('Expected upstream events');
+  const failure = new Error('terminal context proof storage failed');
+  vi.spyOn(repo.subscriptionConversations, 'finish').mockRejectedValueOnce(failure);
+  const emitted: string[] = [];
+  const frames = wrapOpenAIResponsesClientEgress(result.events, request.ctx, request.payload);
+  await expect((async () => {
+    for await (const frame of frames) if (frame.type === 'event') emitted.push(frame.event.type);
+  })()).rejects.toBe(failure);
+  expect(emitted).not.toContain('response.completed');
+  expect((await repo.subscriptionConversations.get(request.id))?.phase).toBe('uncertain');
   expect((await repo.subscriptionPools.runtime('pool', Date.now())).every(account => account.inFlight === 0)).toBe(true);
 });

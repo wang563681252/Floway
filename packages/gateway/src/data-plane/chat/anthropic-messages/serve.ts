@@ -58,7 +58,7 @@ export const anthropicMessagesServe = {
       },
       {
         priorityFor: selection.priorityFor, errorFormat: 'anthropic',
-        conversation: await createConversationRequest(ctx.conversationSecret, 'messages', payload, headers, 'generate', ctx.affinity.codec),
+        conversationForRequest: () => createConversationRequest(ctx.conversationSecret, 'messages', payload, headers, 'generate', ctx.affinity.codec),
       },
     );
   },
@@ -87,7 +87,7 @@ export const anthropicMessagesServe = {
       (candidate, attemptCtx) => anthropicMessagesAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers, anthropicBeta }),
       {
         priorityFor: selection.priorityFor, errorFormat: 'anthropic',
-        conversation: await createConversationRequest(ctx.conversationSecret, 'messages', payload, headers, 'measure', ctx.affinity.codec),
+        conversationForRequest: () => createConversationRequest(ctx.conversationSecret, 'messages', payload, headers, 'measure', ctx.affinity.codec),
       },
     );
   },

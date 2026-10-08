@@ -9,10 +9,11 @@ import { createAlias, deleteAlias, listAliases, updateAlias } from './model-alia
 import { controlPlaneModels } from './models/routes.ts';
 import { performanceOverview } from './performance/routes.ts';
 import { createProxy, deleteProxy, listAllBackoffs, listProxies, listProxyBackoffs, resetProxyBackoffs, testProxy, updateProxy } from './proxies/routes.ts';
-import { subscriptionPoolBody, authLoginBody, changeOwnPasswordBody, claudeCodeOAuthAuthorizeUrlBody, claudeCodeOAuthExchangeBody, claudeCodeOAuthRefreshBody, claudeCodeProbeBody, claudeCodeSetupTokenAuthorizeUrlBody, claudeCodeSetupTokenExchangeBody, codexImportExchangeBody, codexImportPreviewBody, codexOAuthAuthorizeUrlBody, codexOAuthRefreshBody, codexRateLimitResetConsumeBody, codexRateLimitResetCreditsBody, copilotOAuthDeviceLoginPollBody, copilotOAuthDeviceLoginStartBody, copilotQuotaBody, createAliasBody, createKeyBody, createProxyBody, createUpstreamBody, createUserBody, exportQuery, importBody, modelsQuery, ollamaUsageBody, performanceQuery, previewModelsBody, resetBackoffBody, rotateKeyBody, testProxyBody, tokenUsageOverviewQuery, tokenUsageQuery, updateAliasBody, updateKeyBody, updateProxyBody, updateUpstreamBody, updateUserBody, webSearchConfigSchema, webSearchUsageQuery } from './schemas.ts';
+import { subscriptionPoolMemberBody, subscriptionConversationQuery, subscriptionConversationActionBody, subscriptionPoolBody, authLoginBody, changeOwnPasswordBody, claudeCodeOAuthAuthorizeUrlBody, claudeCodeOAuthExchangeBody, claudeCodeOAuthRefreshBody, claudeCodeProbeBody, claudeCodeSetupTokenAuthorizeUrlBody, claudeCodeSetupTokenExchangeBody, codexImportExchangeBody, codexImportPreviewBody, codexOAuthAuthorizeUrlBody, codexOAuthRefreshBody, codexRateLimitResetConsumeBody, codexRateLimitResetCreditsBody, copilotOAuthDeviceLoginPollBody, copilotOAuthDeviceLoginStartBody, copilotQuotaBody, createAliasBody, createKeyBody, createProxyBody, createUpstreamBody, createUserBody, exportQuery, importBody, modelsQuery, ollamaUsageBody, performanceQuery, previewModelsBody, resetBackoffBody, rotateKeyBody, testProxyBody, tokenUsageOverviewQuery, tokenUsageQuery, updateAliasBody, updateKeyBody, updateProxyBody, updateUpstreamBody, updateUserBody, webSearchConfigSchema, webSearchUsageQuery } from './schemas.ts';
 import { getWebSearchConfigRoute, putWebSearchConfigRoute, testWebSearchConfigRoute } from './search-config/routes.ts';
 import { webSearchUsage } from './search-usage/routes.ts';
-import { createSubscriptionPool, deleteSubscriptionPool, listSubscriptionPools, resetSubscriptionPoolCooldowns, updateSubscriptionPool } from './subscription-pools/routes.ts';
+import { actOnSubscriptionConversation, checkSubscriptionConversation, listSubscriptionConversations } from './subscription-pools/conversations.ts';
+import { createSubscriptionPool, deleteSubscriptionPool, listSubscriptionPools, resetSubscriptionPoolCooldowns, updateSubscriptionPool, updateSubscriptionPoolMember } from './subscription-pools/routes.ts';
 import { tokenUsageOverview } from './token-usage/overview.ts';
 import { tokenUsage } from './token-usage/routes.ts';
 import { claudeCodeOAuthAuthorizeUrl, claudeCodeOAuthExchange, claudeCodeOAuthRefresh, claudeCodeProbe, claudeCodeSetupTokenAuthorizeUrl, claudeCodeSetupTokenExchange } from './upstreams/claude-code.ts';
@@ -84,6 +85,10 @@ export const controlPlaneRoutes = new Hono<{ Variables: AuthVars }>()
     .put('/subscription-pools/:id', zValidator('json', subscriptionPoolBody), updateSubscriptionPool)
     .delete('/subscription-pools/:id', deleteSubscriptionPool)
     .post('/subscription-pools/:id/reset-cooldowns', resetSubscriptionPoolCooldowns)
+    .patch('/subscription-pools/:id/members/:upstreamId', zValidator('json', subscriptionPoolMemberBody), updateSubscriptionPoolMember)
+    .get('/subscription-pools/:id/conversations', zValidator('query', subscriptionConversationQuery), listSubscriptionConversations)
+    .get('/subscription-pools/:id/conversations/:conversationId/check', checkSubscriptionConversation)
+    .post('/subscription-pools/:id/conversations/:conversationId/action', zValidator('json', subscriptionConversationActionBody), actOnSubscriptionConversation)
     .get('/upstreams/blueprint', getUpstreamBlueprint)
     .post('/upstreams/copilot/oauth/device-login/start', zValidator('json', copilotOAuthDeviceLoginStartBody), copilotOAuthDeviceLoginStart)
     .post('/upstreams/copilot/oauth/device-login/poll', zValidator('json', copilotOAuthDeviceLoginPollBody), copilotOAuthDeviceLoginPoll)

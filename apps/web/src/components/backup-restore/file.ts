@@ -6,16 +6,18 @@ import { errorMessage } from '../../lib/error-message';
 
 // Annotated with the gateway's own literal so a bump there fails this
 // assignment instead of silently rejecting every backup the deployment writes.
-export const BACKUP_FILE_VERSION: InferResponseType<typeof api.api.export.$get, 200>['version'] = 21;
+export const BACKUP_FILE_VERSION: InferResponseType<typeof api.api.export.$get, 200>['version'] = 22;
 
 const backupFileSchema = z.object({
-  version: z.union([z.literal(20), z.literal(BACKUP_FILE_VERSION)]),
+  version: z.union([z.literal(20), z.literal(21), z.literal(BACKUP_FILE_VERSION)]),
   exportedAt: z.string(),
   data: z.object({
     users: z.array(z.unknown()),
     apiKeys: z.array(z.unknown()),
     upstreams: z.array(z.unknown()),
     subscriptionPools: z.array(z.unknown()).optional(),
+    subscriptionConversations: z.array(z.unknown()).optional(),
+    subscriptionPoolIntake: z.array(z.unknown()).optional(),
     proxies: z.array(z.unknown()),
     usage: z.array(z.unknown()),
     searchUsage: z.array(z.unknown()),
@@ -32,8 +34,11 @@ const backupFileSchema = z.object({
     }
   }),
 }).strict().superRefine((payload, ctx) => {
-  if (payload.version === 21 && payload.data.subscriptionPools === undefined) {
-    ctx.addIssue({ code: 'custom', message: 'version 21 requires subscriptionPools configuration', path: ['data', 'subscriptionPools'] });
+  if (payload.version >= 21 && payload.data.subscriptionPools === undefined) {
+    ctx.addIssue({ code: 'custom', message: `version ${payload.version} requires subscriptionPools configuration`, path: ['data', 'subscriptionPools'] });
+  }
+  if (payload.version === 22 && (payload.data.subscriptionConversations === undefined || payload.data.subscriptionPoolIntake === undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'version 22 requires conversation routing and intake metadata', path: ['data', 'subscriptionConversations'] });
   }
 });
 

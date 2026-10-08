@@ -628,6 +628,20 @@ export const subscriptionPoolBody = z.object({
   message: 'Subscription pool members must be distinct', path: ['upstream_ids'],
 });
 
+export const subscriptionPoolMemberBody = z.object({
+  accept_new_sessions: z.boolean(),
+});
+
+export const subscriptionConversationQuery = z.object({
+  offset: z.string().regex(/^\d+$/).default('0'),
+});
+
+export const subscriptionConversationActionBody = z.object({
+  action: z.enum(['request-migration', 'cancel-migration', 'close']),
+  expected_version: z.number().int().positive(),
+  acknowledge_uncertain: z.boolean().default(false),
+});
+
 // Per-target chat rules. Field names mirror the IR slot each value overlays.
 // Values forward verbatim — no capability narrowing here, so an operator
 // can drive a feature the catalog hasn't advertised yet. All open-string
@@ -748,7 +762,7 @@ export const updateAliasBody = aliasBodyCore.superRefine(aliasBodyRulesRefinemen
 // --- data transfer ---
 
 export const importBody = z.object({
-  version: z.union([z.literal(20), z.literal(21)], { error: 'version must be 20 or 21 — older export formats are not supported; re-export from the current deployment' }),
+  version: z.union([z.literal(20), z.literal(21), z.literal(22)], { error: 'version must be 20, 21 or 22 — older export formats are not supported; re-export from the current deployment' }),
   mode: z.enum(['merge', 'replace'], { error: "mode must be 'merge' or 'replace'" }),
   data: z.unknown().optional(),
 });

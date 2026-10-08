@@ -204,6 +204,10 @@ Generic clients can supply `x-floway-conversation-id`, optionally
 for duplicate-turn protection. These are not the dashboard authentication
 header `x-floway-session`. Codex per-turn body metadata outranks frozen
 WebSocket handshake headers.
+An explicit Floway turn ID identifies one model request. Native agent turn IDs
+can span several tool continuations, so those are deduplicated together with
+their exact request fingerprint rather than blocking a legitimate next tool
+step.
 
 Migration is fidelity-first and only happens after definite account
 unavailability, or an explicitly requested safe handoff. The new request must
@@ -235,11 +239,27 @@ not consume pool slots.
 
 The dashboard shows active requests, credential health, quota observation
 freshness, and model cooldowns. **Clear gateway cooldowns** does not replenish
-upstream quotas. Disable a pool to restore normal upstream ordering; removing
+upstream quotas. Disable a pool to restore normal ordering for unbound requests; existing
+conversation bindings remain sticky. Pause an account's **Accept new sessions**
+switch to drain incoming sessions without moving its existing conversations.
+Use **View conversations → Check / details** to inspect durable phase, blocked
+reason, pending destination and committed migration history. **Request safe
+handoff next turn** only records intent; it cannot bypass the next request's
+full-context checks. Closing an uncertain branch additionally requires explicit
+confirmation that the upstream stopped, creates no replay, and leaves the old
+identifier unusable. Removing
 members requires their active requests to finish; deleting a pool also
 requires its conversations to be closed.
-Configuration is included in version 21 backups; leases and cooldowns are
-ephemeral and are not exported. Version 20 imports remain supported.
+Version 22 backups include pool configuration, intake flags, context proofs and
+turn/migration journals, but never reusable lease or request-owner tokens.
+Restore quarantines every non-closed imported binding as **uncertain**: a
+historical snapshot cannot prove whether later requests executed. Merge imports
+preserve existing bindings instead of overwriting their newer history. Replace
+imports require incoming model traffic to be stopped and requests drained;
+active or uncertain execution ownership cannot be deleted. They cannot discard open bindings missing from
+the backup. Versions 20 and 21 remain supported for older configuration exports.
+These JSON backups do not contain client message histories or native opaque
+context; restoring them does not manufacture either.
 
 ## Other Deployment Options
 

@@ -22,12 +22,16 @@ export class ConversationTurn {
 
   async completed(output: ConversationContext, replace = false): Promise<void> {
     if (this.settled) return;
+    const previous = this.claim.conversation;
+    const continuous = previous.contextHash === null && previous.contextLength === 0
+      || previous.portable && this.request.context.entries.length >= previous.contextLength
+      && await this.request.hash(this.request.context.entries, previous.contextLength) === previous.contextHash;
     const entries = replace ? output.entries : [...this.request.context.entries, ...output.entries];
     await getRepo().subscriptionConversations.finish({
       id: this.claim.conversation.id, token: this.token, phase: 'completed',
       contextHash: await this.request.hash(entries), contextLength: entries.length,
       settingsHash: replace ? this.claim.conversation.settingsHash ?? this.request.settingsHash : this.request.settingsHash,
-      modelKey: this.modelKey, portable: (replace || this.request.context.portable) && output.portable,
+      modelKey: this.modelKey, portable: (replace || continuous && this.request.context.portable) && output.portable,
     });
     this.settled = true;
     await this.closeCompletedOwner?.();
@@ -147,10 +151,8 @@ export const observeConversationFrames = <T, R>(
               const result = await assembled;
               if (!result.ok) terminalFailure = result.error;
               else {
-                try {
-                  await turn.completed(await normalize(result.value), replace(result.value));
-                  ended = true;
-                } catch (error) { terminalFailure = error; }
+                await turn.completed(await normalize(result.value), replace(result.value));
+                ended = true;
               }
             }
             yield frame;

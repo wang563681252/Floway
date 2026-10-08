@@ -58,7 +58,7 @@ export const geminiGenerateContentServe = {
       },
       {
         priorityFor: selection.priorityFor, errorFormat: 'gemini',
-        conversation: await createConversationRequest(ctx.conversationSecret, 'gemini', payload, headers, 'generate', ctx.affinity.codec),
+        conversationForRequest: () => createConversationRequest(ctx.conversationSecret, 'gemini', payload, headers, 'generate', ctx.affinity.codec),
       },
     );
   },
@@ -86,7 +86,7 @@ export const geminiGenerateContentServe = {
       (candidate, attemptCtx) => geminiGenerateContentAttempt.countTokens({ payload: selection.payloadFor(candidate), ctx: { ...ctx, abortSignal: attemptCtx.abortSignal }, candidate, headers }),
       {
         priorityFor: selection.priorityFor, errorFormat: 'gemini',
-        conversation: await createConversationRequest(ctx.conversationSecret, 'gemini', payload, headers, 'measure', ctx.affinity.codec),
+        conversationForRequest: () => createConversationRequest(ctx.conversationSecret, 'gemini', payload, headers, 'measure', ctx.affinity.codec),
       },
     );
   },

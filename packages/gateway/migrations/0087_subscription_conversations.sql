@@ -53,3 +53,10 @@ WHEN EXISTS (SELECT 1 FROM subscription_conversations WHERE pool_id = OLD.id AND
 BEGIN
   SELECT RAISE(ABORT, 'Subscription pool has open conversations');
 END;
+
+CREATE TRIGGER subscription_conversation_owner_busy
+BEFORE DELETE ON subscription_conversations
+WHEN OLD.phase IN ('preparing', 'dispatched') OR (OLD.phase = 'uncertain' AND OLD.request_token IS NOT NULL)
+BEGIN
+  SELECT RAISE(ABORT, 'Conversation has active or uncertain execution');
+END;

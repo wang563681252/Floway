@@ -15,6 +15,7 @@ import { notifyDisabledBestEffort } from '../../dump/registry.ts';
 import { type CtxWithJson, type CtxWithQuery } from '../../middleware/zod-validator.ts';
 import { getRepo } from '../../repo/index.ts';
 import { DIRECT_FALLBACK_IDS } from '../../repo/proxy-fallback-list.ts';
+import type { SubscriptionConversationBackup } from '../../repo/subscription-conversations.ts';
 import type { SubscriptionPool } from '../../repo/subscription-pools.ts';
 import type { ApiKey, PerformanceTelemetryRecord, UsageRecord, User, WebSearchUsageRecord } from '../../repo/types.ts';
 import { type exportQuery, type importBody } from '../schemas.ts';
@@ -24,10 +25,12 @@ import { type FullSerializedUpstreamRecord, upstreamRecordToFullJson } from '../
 import type { UpstreamRecord } from '@floway-dev/provider';
 
 interface ExportPayload {
-  version: 21;
+  version: 22;
   exportedAt: string;
   data: {
     subscriptionPools: SubscriptionPool[];
+    subscriptionConversations: SubscriptionConversationBackup[];
+    subscriptionPoolIntake: Array<{ upstreamId: string; acceptNewSessions: boolean }>;
     users: User[];
     apiKeys: ApiKey[];
     upstreams: FullSerializedUpstreamRecord[];
@@ -40,7 +43,7 @@ interface ExportPayload {
   };
 }
 
-const EXPORT_VERSION = 21;
+const EXPORT_VERSION = 22;
 
 const validateApiKeyIdentities = (records: readonly ApiKey[], existing: readonly ApiKey[], mode: 'merge' | 'replace'): string | null => {
   const ids = new Map<string, number>();
@@ -120,6 +123,8 @@ export const exportData = async (c: CtxWithQuery<typeof exportQuery>) => {
     data: {
       users,
       subscriptionPools: await repo.subscriptionPools.list(),
+      subscriptionConversations: [],
+      subscriptionPoolIntake: [],
       apiKeys,
       upstreams: upstreams.map(upstreamRecordToFullJson),
       proxies: proxies.map(proxy => ({ id: proxy.id, name: proxy.name, url: proxy.url, dial_timeout_seconds: proxy.dialTimeoutSeconds })),
@@ -129,6 +134,11 @@ export const exportData = async (c: CtxWithQuery<typeof exportQuery>) => {
       searchConfig: rawWebSearchConfig === null ? parseWebSearchConfigDefault() : parseWebSearchConfigStrict(rawWebSearchConfig),
     },
   };
+  for (const pool of payload.data.subscriptionPools) {
+    payload.data.subscriptionConversations.push(...await repo.subscriptionConversations.backup(pool.id));
+    payload.data.subscriptionPoolIntake.push(...(await repo.subscriptionPools.runtime(pool.id, Date.now())).map(member =>
+      ({ upstreamId: member.upstreamId, acceptNewSessions: member.acceptNewSessions })));
+  }
   if (includePerformance) payload.data.performance = performance;
 
   return c.json(payload);
@@ -136,12 +146,16 @@ export const exportData = async (c: CtxWithQuery<typeof exportQuery>) => {
 
 export const importData = async (c: CtxWithJson<typeof importBody>) => {
   const { mode, version, data: rawData } = c.req.valid('json');
-  if (version === 21 && (rawData === null || typeof rawData !== 'object' || !Object.hasOwn(rawData, 'subscriptionPools'))) {
-    return c.json({ error: 'version 21 requires subscriptionPools configuration' }, 400);
+  if (version >= 21 && (rawData === null || typeof rawData !== 'object' || !Object.hasOwn(rawData, 'subscriptionPools'))) {
+    return c.json({ error: `version ${version} requires subscriptionPools configuration` }, 400);
+  }
+  if (version === 22 && (rawData === null || typeof rawData !== 'object'
+    || !Object.hasOwn(rawData, 'subscriptionConversations') || !Object.hasOwn(rawData, 'subscriptionPoolIntake'))) {
+    return c.json({ error: 'version 22 requires subscriptionConversations and subscriptionPoolIntake metadata' }, 400);
   }
   const parsed = parseImportData(rawData);
   if (parsed.type === 'invalid') return c.json({ error: parsed.error }, 400);
-  const { users, apiKeys, upstreams, proxies, usage, searchUsage, performance, performanceIncluded, searchConfig, subscriptionPools } = parsed.data;
+  const { users, apiKeys, upstreams, proxies, usage, searchUsage, performance, performanceIncluded, searchConfig, subscriptionPools, subscriptionConversations, subscriptionPoolIntake } = parsed.data;
 
   const repo = getRepo();
   const existingPools = mode === 'merge' ? await repo.subscriptionPools.list() : [];
@@ -151,6 +165,35 @@ export const importData = async (c: CtxWithJson<typeof importBody>) => {
   const prospectiveUpstreams = mode === 'merge'
     ? [...(await repo.upstreams.list()).filter(upstream => !incomingIds.has(upstream.id)), ...upstreams]
     : upstreams;
+  const prospectiveKeys = mode === 'merge'
+    ? [...(await repo.apiKeys.listIncludingDeleted()).filter(key => !apiKeys.some(incoming => incoming.id === key.id)), ...apiKeys]
+    : apiKeys;
+  for (const snapshot of subscriptionConversations) {
+    if (!prospectivePools.some(pool => pool.id === snapshot.conversation.poolId)
+      || !prospectiveKeys.some(key => key.id === snapshot.conversation.apiKeyId)) {
+      return c.json({ error: 'Conversation metadata references an unknown pool or API key' }, 400);
+    }
+  }
+  if (subscriptionPoolIntake.some(member => !prospectivePools.some(pool => pool.upstreamIds.includes(member.upstreamId)))) {
+    return c.json({ error: 'Subscription intake metadata references an unknown pool member' }, 400);
+  }
+  const currentPools = await repo.subscriptionPools.list();
+  if (mode === 'replace' && currentPools.length > 0) {
+    for (const pool of currentPools) {
+      if ((await repo.subscriptionPools.runtime(pool.id, Date.now())).some(account => account.inFlight > 0)) {
+        return c.json({ error: 'Drain active subscription requests before a replace import; live ownership cannot be erased' }, 409);
+      }
+      const existing = await repo.subscriptionConversations.list(pool.id);
+      if (existing.some(conversation => ['preparing', 'dispatched'].includes(conversation.phase)
+        || conversation.phase === 'uncertain' && conversation.requestToken !== null)) {
+        return c.json({ error: 'Drain active conversation turns before a replace import; dispatched ownership cannot be erased' }, 409);
+      }
+      if (existing.some(conversation => conversation.phase !== 'closed'
+        && !subscriptionConversations.some(snapshot => snapshot.conversation.id === conversation.id))) {
+        return c.json({ error: 'Replace import cannot discard open conversation bindings; include their metadata or safely close the branches first' }, 409);
+      }
+    }
+  }
   const poolError = await validateSubscriptionPoolMembers(prospectivePools, prospectiveUpstreams);
   if (poolError) return c.json({ error: `invalid subscriptionPools: ${poolError}` }, 400);
   for (const pool of subscriptionPools) {
@@ -167,6 +210,17 @@ export const importData = async (c: CtxWithJson<typeof importBody>) => {
   const preImportKeys = await repo.apiKeys.listIncludingDeleted();
   const apiKeyIdentityError = validateApiKeyIdentities(apiKeys, mode === 'merge' ? preImportKeys : [], mode);
   if (apiKeyIdentityError) return c.json({ error: `invalid apiKeys: ${apiKeyIdentityError}` }, 400);
+  if (mode === 'merge') {
+    for (const key of apiKeys) {
+      const previous = preImportKeys.find(item => item.id === key.id);
+      if (!previous || previous.serverSecret === key.serverSecret) continue;
+      for (const pool of currentPools) {
+        if ((await repo.subscriptionConversations.list(pool.id)).some(conversation => conversation.apiKeyId === key.id && conversation.phase !== 'closed')) {
+          return c.json({ error: 'API-key context secret cannot change while durable conversations are open' }, 409);
+        }
+      }
+    }
+  }
   const preImportRetentionById = new Map<string, number | null>(preImportKeys.map(key => [key.id, key.dumpRetentionSeconds]));
 
   const existingProxyIdsForRefs = mode === 'merge' ? (await repo.proxies.list()).map(proxy => proxy.id) : [];
@@ -220,6 +274,15 @@ export const importData = async (c: CtxWithJson<typeof importBody>) => {
     next,
   }))));
   for (const pool of subscriptionPools) await repo.subscriptionPools.save(pool);
+  for (const member of subscriptionPoolIntake) {
+    if (!await repo.subscriptionPools.setAcceptNewSessions(member.upstreamId, member.acceptNewSessions)) {
+      throw new Error('Subscription pool intake member disappeared while restoring metadata');
+    }
+  }
+  let restoredConversations = 0;
+  for (const snapshot of subscriptionConversations) {
+    if (await repo.subscriptionConversations.restore(snapshot)) restoredConversations++;
+  }
   for (const record of performance) await repo.performance.set(record);
   await repo.webSearchConfig.save(searchConfig);
 
@@ -230,6 +293,11 @@ export const importData = async (c: CtxWithJson<typeof importBody>) => {
       apiKeys: apiKeys.length,
       upstreams: upstreams.length,
       subscriptionPools: subscriptionPools.length,
+      ...(version >= 22 ? {
+        subscriptionPoolIntake: subscriptionPoolIntake.length,
+        subscriptionConversations: restoredConversations,
+        subscriptionConversationsPreserved: subscriptionConversations.length - restoredConversations,
+      } : {}),
       proxies: proxies.length,
       usage: usage.length,
       searchUsage: searchUsage.length,

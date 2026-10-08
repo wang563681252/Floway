@@ -53,7 +53,7 @@ export const openaiChatCompletionsServe = {
       },
       {
         priorityFor: selection.priorityFor,
-        conversation: await createConversationRequest(ctx.conversationSecret, 'chat', payload, headers, 'generate', ctx.affinity.codec),
+        conversationForRequest: () => createConversationRequest(ctx.conversationSecret, 'chat', payload, headers, 'generate', ctx.affinity.codec),
       },
     );
   },

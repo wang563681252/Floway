@@ -285,6 +285,9 @@ export default function DashboardAdminBackupRestore() {
             {t('dashboard.backupRestore.import.replaceWarning')}
           </OutcomeMessageBar>
         )}
+        {importParsedData?.data.subscriptionConversations?.length !== undefined && importParsedData.data.subscriptionConversations.length > 0 && (
+          <OutcomeMessageBar intent="warning">{t('dashboard.backupRestore.import.conversationWarning')}</OutcomeMessageBar>
+        )}
 
         {importError && (
           <OutcomeMessageBar

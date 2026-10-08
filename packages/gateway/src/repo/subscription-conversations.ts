@@ -40,6 +40,12 @@ export interface SubscriptionConversationMigration {
   occurredAt: number;
 }
 
+export interface SubscriptionConversationBackup {
+  conversation: Omit<SubscriptionConversation, 'requestToken' | 'leaseToken' | 'turnKey' | 'requestHash' | 'lockUntil'>;
+  turns: Array<{ turnKey: string; requestHash: string; phase: 'completed' | 'uncertain' }>;
+  history: SubscriptionConversationMigration[];
+}
+
 export type ConversationClaimResult =
   | { kind: 'claimed'; claim: ConversationClaim }
   | { kind: 'busy' | 'uncertain' | 'repeated' | 'conflict' };
@@ -48,6 +54,8 @@ export interface SubscriptionConversationsRepo {
   get(id: string): Promise<SubscriptionConversation | null>;
   list(poolId: string): Promise<SubscriptionConversation[]>;
   history(id: string): Promise<SubscriptionConversationMigration[]>;
+  backup(poolId: string): Promise<SubscriptionConversationBackup[]>;
+  restore(snapshot: SubscriptionConversationBackup): Promise<boolean>;
   start(input: {
     id: string; poolId: string; apiKeyId: string; upstreamId: string; identity: string;
     leaseToken: string; requestToken: string; now: number; lockUntil: number;

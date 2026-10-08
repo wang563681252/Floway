@@ -124,8 +124,12 @@ export const iterateCandidates = async <T extends IterableAttemptResult>(
     } catch (error) {
       failure = error;
       if (candidate.provider.isSubscriptionCredentialError?.(error) && !lease.signal.aborted) {
-        await selected.turn?.rejected('credential_invalid');
-        await recordSubscriptionPoolOutcome(candidate, 401, undefined, quotaScope);
+        try {
+          await selected.turn?.rejected('credential_invalid');
+          await recordSubscriptionPoolOutcome(candidate, 401, undefined, quotaScope);
+        } catch (stateError) {
+          throw new AggregateError([error, stateError], 'Credential rejection and conversation persistence failed', { cause: error });
+        }
         console.warn('[subscription-pool] credential unavailable before response', candidate.provider.upstreamId);
         lastCredentialFailure = error;
         lastFailure = undefined;

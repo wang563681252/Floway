@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
+import { deviceIdForUpstream } from '../src/interceptors/anthropic-messages/synthesize-metadata-user-id.ts';
 import { buildClaudeCodeCatalog, type ClaudeCodeApiModel } from '../src/models.ts';
 import { pricingForClaudeCodeModelKey } from '../src/pricing.ts';
 import { createClaudeCodeProvider } from '../src/provider.ts';
 import type { ClaudeCodeAccessTokenEntry, ClaudeCodeAccountCredential, ClaudeCodeUpstreamState } from '../src/state.ts';
 import type { AnthropicMessagesPayload, AnthropicMessagesTextBlock } from '@floway-dev/protocols/anthropic-messages';
-import { initProviderRepo, type FlagId, type AnthropicMessagesUpstreamCallOptions, type UpstreamRecord } from '@floway-dev/provider';
+import { initProviderRepo, isRecord, type FlagId, type AnthropicMessagesUpstreamCallOptions, type UpstreamRecord } from '@floway-dev/provider';
 import { noopAnthropicMessagesUpstreamCallOptions, noopUpstreamCallOptions, readJsonRequest } from '@floway-dev/test-utils';
 
 const upstreamId = 'up_cc_provider';
@@ -236,6 +237,30 @@ describe('createClaudeCodeProvider — callAnthropicMessages routes through chai
     expect(wireHeaders.get('anthropic-version')).toBe('2023-06-01');
     // Authorization is replaced by the cached OAuth token.
     expect(wireHeaders.get('authorization')).toBe('Bearer at_cached');
+  });
+
+  test('pooled Claude conversations keep their session but replace source account/device metadata before native dispatch', async () => {
+    const instance = createClaudeCodeProvider(currentRecord);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sseResponse());
+    const system: AnthropicMessagesTextBlock[] = [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }];
+    await instance.instance.callAnthropicMessages(
+      sonnetProviderModel,
+      {
+        max_tokens: 16, messages: [{ role: 'user', content: 'hi' }], system,
+        metadata: { user_id: JSON.stringify({ device_id: 'source-device', account_uuid: 'source-account', session_id: 'logical-session' }) },
+      },
+      undefined,
+      cliClientCallOpts({ subscriptionSession: { sessionId: 'logical-session', threadId: 'logical-session', turnId: 'turn' } }),
+    );
+    const init = fetchSpy.mock.calls[0]?.[1];
+    if (!init) throw new Error('Expected native Claude request');
+    const body: unknown = await readJsonRequest(init);
+    if (!isRecord(body) || !isRecord(body.metadata) || typeof body.metadata.user_id !== 'string') throw new Error('Missing native metadata envelope');
+    expect(body.system).toEqual(system);
+    const identity: unknown = JSON.parse(body.metadata.user_id);
+    expect(identity).toEqual({ device_id: deviceIdForUpstream(upstreamId), account_uuid: '', session_id: 'logical-session' });
+    expect(body.metadata.user_id).not.toContain('source-account');
+    expect(body.metadata.user_id).not.toContain('source-device');
   });
 
   test('CC UA but a payload that fails the strict shape gate still runs the chain', async () => {

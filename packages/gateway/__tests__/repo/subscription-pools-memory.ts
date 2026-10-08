@@ -83,7 +83,9 @@ export class MemorySubscriptionPoolsRepo implements SubscriptionPoolsRepo {
       if (!binding || binding.apiKeyId !== input.conversation?.apiKeyId || binding.poolId !== pool.id || binding.phase === 'closed') return null;
     }
     const records = await Promise.all(input.candidates.map(candidate => this.upstreams.getById(candidate.upstreamId)));
-    const bound = input.conversation?.isNew ? await this.conversations?.list(pool.id) ?? [] : [];
+    const conversations = this.conversations;
+    const bound = input.conversation?.isNew && conversations
+      ? (await Promise.all([...this.pools.keys()].map(id => conversations.list(id)))).flat() : [];
     this.expire(input.now);
     const count = (identity: string) => [...this.leases.values()].filter(lease => lease.identity === identity).length;
     const candidates = input.candidates.filter((candidate, index) => {

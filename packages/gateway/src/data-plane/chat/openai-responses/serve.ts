@@ -48,7 +48,7 @@ export const openaiResponsesServe = {
       },
       {
         priorityFor: plan.affinitySelection.priorityFor,
-        conversation: await createConversationRequest(ctx.conversationSecret, 'responses', plan.conversationPayload, headers, 'generate', ctx.affinity.codec),
+        conversationForRequest: () => createConversationRequest(ctx.conversationSecret, 'responses', plan.conversationPayload, headers, 'generate', ctx.affinity.codec),
       },
     );
     return result;
@@ -87,7 +87,7 @@ export const openaiResponsesServe = {
       },
       {
         priorityFor: plan.affinitySelection.priorityFor,
-        conversation: await createConversationRequest(ctx.conversationSecret, 'responses', plan.conversationPayload, headers, 'compact', ctx.affinity.codec),
+        conversationForRequest: () => createConversationRequest(ctx.conversationSecret, 'responses', plan.conversationPayload, headers, 'compact', ctx.affinity.codec),
       },
     );
     if (result.type !== 'result') return result;

@@ -3,7 +3,8 @@ import { useCallback, useState } from 'react';
 import type { Route } from './+types/dashboard-providers-subscription-pools';
 import { requireDashboardAdmin } from './guards';
 import { api, callApi, callApiNoContent } from '../api/client';
-import type { PoolUpstreamOption, SubscriptionPoolView } from '../components/subscription-pools/data';
+import { SubscriptionConversationsDialog } from '../components/subscription-pools/conversations';
+import type { ConversationPage, PoolUpstreamOption, SubscriptionPoolView } from '../components/subscription-pools/data';
 import { SubscriptionPoolDialog } from '../components/subscription-pools/dialog';
 import { ConfirmDialog } from '../components/ui/confirm-dialog';
 import { DashboardPageHeader } from '../components/ui/dashboard-page-header';
@@ -12,6 +13,7 @@ import { Panel } from '../components/ui/panel';
 import { ResourceListActions, ResourceListEmptyState } from '../components/ui/resource-list';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { SectionHeader } from '../components/ui/section-header';
+import { SettingsSwitch } from '../components/ui/settings-card';
 import { useDialogInvocation } from '../components/ui/use-dialog-invocation';
 import { useRefresh } from '../components/ui/use-refresh';
 import { fluentComponents } from '../fluent';
@@ -51,6 +53,7 @@ export default function DashboardProvidersSubscriptionPools({ loaderData }: Rout
   const [mutating, setMutating] = useState(false);
   const editor = useDialogInvocation<SubscriptionPoolView | null>();
   const deletion = useDialogInvocation<SubscriptionPoolView>();
+  const conversations = useDialogInvocation<{ pool: SubscriptionPoolView; page: ConversationPage }>();
   const load = useCallback(async (signal: AbortSignal) => {
     const next = await loadData(data, signal);
     if (!signal.aborted) setData(next);
@@ -75,6 +78,26 @@ export default function DashboardProvidersSubscriptionPools({ loaderData }: Rout
     else await refresh();
   };
   const percent = new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 1 });
+  const toggleIntake = async (pool: SubscriptionPoolView, upstreamId: string, accept: boolean) => {
+    if (mutating) return;
+    setMutating(true);
+    try {
+      const result = await callApiNoContent(() => api.api['subscription-pools'][':id'].members[':upstreamId'].$patch({
+        param: { id: pool.id, upstreamId }, json: { accept_new_sessions: accept },
+      }));
+      if (result.error) setData(current => ({ ...current, error: result.error.message }));
+      else await refresh();
+    } finally { setMutating(false); }
+  };
+  const showConversations = async (pool: SubscriptionPoolView) => {
+    if (mutating) return;
+    setMutating(true);
+    try {
+      const result = await callApi(() => api.api['subscription-pools'][':id'].conversations.$get({ param: { id: pool.id }, query: { offset: '0' } }));
+      if (result.error) setData(current => ({ ...current, error: result.error.message }));
+      else conversations.open({ pool, page: result.data });
+    } finally { setMutating(false); }
+  };
 
   return <section className="dashboard-page">
     <DashboardPageHeader
@@ -97,6 +120,7 @@ export default function DashboardProvidersSubscriptionPools({ loaderData }: Rout
       <SectionHeader
         actions={<div className="flex flex-wrap gap-2">
           <Button disabled={mutating} onClick={() => editor.open(pool)}>{t('dashboard.subscriptionPools.edit')}</Button>
+          <Button disabled={mutating} onClick={() => void showConversations(pool)}>{t('dashboard.subscriptionPools.sessions.show')}</Button>
           <Button disabled={mutating} onClick={() => void reset(pool)}>{t('dashboard.subscriptionPools.reset')}</Button>
           <Button disabled={mutating} onClick={() => deletion.open(pool)}>{t('dashboard.subscriptionPools.delete')}</Button>
         </div>}
@@ -108,13 +132,18 @@ export default function DashboardProvidersSubscriptionPools({ loaderData }: Rout
       <ScrollArea axes="horizontal">
         <Table aria-label={t('dashboard.subscriptionPools.accounts')}>
           <TableHeader><TableRow>
-            {(['account', 'health', 'inFlight', 'quota', 'observed', 'cooldown'] as const).map(column =>
+            {(['account', 'health', 'inFlight', 'sessions', 'intake', 'quota', 'observed', 'cooldown'] as const).map(column =>
               <TableHeaderCell key={column}>{t(`dashboard.subscriptionPools.columns.${column}`)}</TableHeaderCell>)}
           </TableRow></TableHeader>
           <TableBody>{pool.accounts.map(account => <TableRow key={account.upstream_id}>
             <TableCell>{account.name}</TableCell>
             <TableCell>{account.enabled ? t(`dashboard.subscriptionPools.health.${account.health}`) : t('dashboard.subscriptionPools.health.disabled')}</TableCell>
             <TableCell>{account.in_flight}</TableCell>
+            <TableCell>{account.recent_sessions}</TableCell>
+            <TableCell><SettingsSwitch checked={account.accept_new_sessions} disabled={mutating}
+              label={t('dashboard.subscriptionPools.intakeLabel', { name: account.name })}
+              onChange={value => void toggleIntake(pool, account.upstream_id, value)}
+            /></TableCell>
             <TableCell>{account.utilization === null ? t('dashboard.subscriptionPools.unknown') : percent.format(account.utilization)}</TableCell>
             <TableCell>{dateTime(account.quota_observed_at, locale)}</TableCell>
             <TableCell>
@@ -136,6 +165,14 @@ export default function DashboardProvidersSubscriptionPools({ loaderData }: Rout
       pools={data.pools}
       record={editor.invocation.value}
       upstreams={data.upstreams}
+    />}
+    {conversations.invocation && <SubscriptionConversationsDialog
+      key={conversations.invocation.key}
+      initialPage={conversations.invocation.value.page}
+      onChanged={refresh}
+      onOpenChange={value => { if (!value) conversations.close(); }}
+      open={conversations.isOpen}
+      pool={conversations.invocation.value.pool}
     />}
     {deletion.invocation && <ConfirmDialog
       actionLabel={t('dashboard.subscriptionPools.delete')}

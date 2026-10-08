@@ -166,5 +166,34 @@ for (const [label, create] of [
       expect(blocked).toMatchObject({ migrationRequested: true, blockedReason: 'history_mismatch', version: 4 });
       expect(await repo.subscriptionConversations.cancelMigration('session', 4)).toBe(true);
     });
+
+    test('backups omit reusable ownership and restore every open binding behind an uncertainty gate', async () => {
+      const repo = await setup();
+      await claim(repo, 'session', 'first', 'account-a', null, 'turn');
+      await complete(repo, 'session', 'first');
+      const snapshot = (await repo.subscriptionConversations.backup('pool'))[0];
+      if (!snapshot) throw new Error('Expected snapshot');
+      expect(Object.keys(snapshot.conversation)).not.toContain('requestToken');
+      expect(Object.keys(snapshot.conversation)).not.toContain('leaseToken');
+      expect(snapshot.turns).toEqual([{ turnKey: 'turn', requestHash: 'request-first', phase: 'completed' }]);
+      expect(await repo.subscriptionConversations.restore(snapshot)).toBe(false);
+      await repo.subscriptionConversations.deleteAll();
+      expect(await repo.subscriptionConversations.restore(snapshot)).toBe(true);
+      expect(await repo.subscriptionConversations.get('session')).toMatchObject({
+        upstreamId: 'account-a', phase: 'uncertain', blockedReason: 'restored_requires_confirmation', requestToken: null, leaseToken: null,
+      });
+      expect(await repo.subscriptionConversations.requestMigration('session', 3)).toBe(false);
+      expect(await repo.subscriptionConversations.close('session', 3, true)).toBe(true);
+    });
+
+    test('storage itself prevents erasing prepared or dispatched ownership even when a caller skips prechecks', async () => {
+      const repo = await setup();
+      await claim(repo, 'session', 'owner');
+      await expect(repo.subscriptionConversations.deleteAll()).rejects.toThrow('active or uncertain execution');
+      await repo.subscriptionConversations.dispatched('session', 'owner');
+      await expect(repo.subscriptionPools.deleteAll()).rejects.toThrow('active or uncertain execution');
+      expect((await repo.subscriptionConversations.get('session'))?.phase).toBe('dispatched');
+      expect((await repo.subscriptionPools.runtime('pool', Date.now()))[0]?.inFlight).toBe(1);
+    });
   });
 }

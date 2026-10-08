@@ -3,6 +3,7 @@ import { providerModelOf, type ModelCandidate } from '@floway-dev/provider';
 
 export interface PoolIterationOptions {
   conversation?: ConversationRequest | null;
+  conversationForRequest?: () => Promise<ConversationRequest | null>;
   quotaScope?: string;
   priorityFor?: (candidate: ModelCandidate) => number;
   errorFormat?: 'openai' | 'anthropic' | 'gemini';
